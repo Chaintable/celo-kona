@@ -2365,15 +2365,18 @@ dependencies = [
  "alloy-rpc-types-engine",
  "alloy-rpc-types-eth",
  "alloy-sol-types",
+ "async-trait",
  "bytes",
  "celo-alloy-consensus",
  "celo-alloy-rpc-types",
  "celo-revm",
  "clap",
  "eyre",
+ "futures",
  "futures-util",
  "jsonrpsee",
  "jsonrpsee-types",
+ "md-5",
  "metrics",
  "op-alloy-consensus",
  "op-alloy-rpc-types",
@@ -2431,9 +2434,13 @@ dependencies = [
  "reth-tasks",
  "reth-tracing",
  "reth-transaction-pool",
+ "reth-trie",
  "revm",
+ "revm-bytecode",
+ "revm-inspectors",
  "serde",
  "serde_json",
+ "sha1",
  "tempfile",
  "tokio",
  "toml 0.9.12+spec-1.1.0",
@@ -3118,7 +3125,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ccc2776f0c61eca1ca32528f85548abd1a4be8fb53d1b21c013e4f18da1e7090"
 dependencies = [
  "data-encoding",
- "syn 1.0.109",
+ "syn 2.0.117",
 ]
 
 [[package]]
@@ -6171,6 +6178,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d1525a2a28c7f4fa0fc98bb91ae755d1e2d1505079e05539e35bc876b5d65ae9"
 dependencies = [
  "regex-automata",
+]
+
+[[package]]
+name = "md-5"
+version = "0.10.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d89e7ee0cfbedfc4da3340218492196241d89eefb6dab27de5df917a6d2e78cf"
+dependencies = [
+ "cfg-if",
+ "digest 0.10.7",
 ]
 
 [[package]]

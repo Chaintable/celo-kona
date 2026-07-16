@@ -145,6 +145,8 @@ revm = { version = "38.0.0", default-features = false }
 op-revm = { version = "20.0.0", default-features = false }
 alloy-evm = { version = "0.34.0", default-features = false }
 alloy-op-evm = { version = "0.32.0", default-features = false }
+revm-bytecode = { version = "10.0.0", default-features = false }
+revm-inspectors = "0.39.0"
 
 # Dependencies not in upstream kona-client
 # These are kept separately to make it easier to compare and update the versions above
@@ -174,6 +176,7 @@ reth-rpc-traits = { version = "0.3.1", default-features = false }
 reth-rpc-eth-types = { git = "https://github.com/paradigmxyz/reth", rev = "7680d6d8a931c0af4f4eed26e971596970238b54" }
 reth-storage-api = { git = "https://github.com/paradigmxyz/reth", rev = "7680d6d8a931c0af4f4eed26e971596970238b54", default-features = false }
 reth-storage-errors = { git = "https://github.com/paradigmxyz/reth", rev = "7680d6d8a931c0af4f4eed26e971596970238b54", default-features = false }
+reth-trie = { git = "https://github.com/paradigmxyz/reth", rev = "7680d6d8a931c0af4f4eed26e971596970238b54" }
 reth-payload-util = { git = "https://github.com/paradigmxyz/reth", rev = "7680d6d8a931c0af4f4eed26e971596970238b54" }
 reth-transaction-pool = { git = "https://github.com/paradigmxyz/reth", rev = "7680d6d8a931c0af4f4eed26e971596970238b54" }
 reth-cli-commands = { git = "https://github.com/paradigmxyz/reth", rev = "7680d6d8a931c0af4f4eed26e971596970238b54" }
@@ -222,6 +225,7 @@ spin = "0.10.0"
 clap = { version = "4.5.58", features = ["derive"] }
 tokio = { version = "1.49.0", default-features = false }
 futures-util = { version = "0.3.31", default-features = false }
+futures = "0.3.31"
 cfg-if = "1.0.4"
 rstest = "0.26.1"
 tempfile = "3.24.0"
@@ -269,6 +273,8 @@ rocksdb = { version = "0.24.0", default-features = false }
 
 # Cryptography
 ark-ff = { version = "0.5.0", default-features = false }
+sha1 = { version = "0.10.6", default-features = false }
+md-5 = { version = "0.10.6", default-features = false }
 
 # Tracing and telemetry
 tracing-opentelemetry = "0.31.0"

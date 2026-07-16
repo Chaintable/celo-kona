@@ -55,6 +55,14 @@ pub mod payload;
 pub mod rpc;
 
 #[cfg(feature = "std")]
+#[allow(missing_docs)]
+pub mod debank;
+
+#[cfg(feature = "std")]
+#[allow(missing_docs)]
+pub mod trace;
+
+#[cfg(feature = "std")]
 pub mod chainspec;
 
 #[cfg(feature = "std")]

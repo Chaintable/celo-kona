@@ -40,6 +40,7 @@ reth-node-core.workspace = true
 reth-node-metrics.workspace = true
 reth-provider.workspace = true
 reth-revm.workspace = true
+reth-trie.workspace = true
 reth-tasks.workspace = true
 reth-tracing.workspace = true
 reth-transaction-pool.workspace = true
@@ -104,6 +105,8 @@ celo-revm = { workspace = true, features = ["alloy-op-evm", "optional_no_base_fe
 # Revm
 revm.workspace = true
 op-revm.workspace = true
+revm-bytecode.workspace = true
+revm-inspectors.workspace = true
 
 # Reth codecs and db
 reth-codecs.workspace = true
@@ -116,12 +119,16 @@ reth-static-file-types.workspace = true
 # RPC
 jsonrpsee.workspace = true
 jsonrpsee-types.workspace = true
+async-trait.workspace = true
 
 # Misc
 alloy-rlp.workspace = true
 bytes.workspace = true
 clap.workspace = true
 eyre.workspace = true
+futures.workspace = true
+sha1.workspace = true
+md-5.workspace = true
 serde.workspace = true
 serde_json = { workspace = true, features = ["std"] }
 tokio = { workspace = true, features = ["sync", "time"] }
