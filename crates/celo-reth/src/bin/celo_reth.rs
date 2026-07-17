@@ -19,6 +19,7 @@ use celo_reth::{
     },
     snapshot_manifest::CeloSnapshotManifestCommand,
     state_import::ImportCeloStateCommand,
+    trace::{CeloDebankTraceApiImpl, CeloDebankTraceApiServer},
 };
 use clap::{ArgMatches, CommandFactory, FromArgMatches, Parser};
 use futures_util::FutureExt;
@@ -582,7 +583,8 @@ where
     // Single consolidated extend_rpc_modules. Installs:
     //   1. proofs-history EthApiExt + DebugApiExt (override eth_getProof and the debug_* sidecar
     //      methods) — only when enabled
-    //   2. Celo gas / fee-history / tx modules — always; admin module only on transports where the
+    //   2. trace_debankBlock — only on transports where the `trace` namespace is enabled
+    //   3. Celo gas / fee-history / tx modules — always; admin module only on transports where the
     //      `admin` namespace is enabled
     let handle = node_builder
         .extend_rpc_modules(move |ctx| {
@@ -612,7 +614,11 @@ where
                 );
             }
 
-            // 2. Celo modules.
+            // 2. DeBank block trace API.
+            let debank_api = CeloDebankTraceApiImpl::new(ctx.registry.eth_api().clone());
+            ctx.modules.merge_if_module_configured(RethRpcModule::Trace, debank_api.into_rpc())?;
+
+            // 3. Celo modules.
             let chain_id = ctx.config().chain.chain().id();
             let fee_currency_directory =
                 celo_revm::constants::get_addresses(chain_id).fee_currency_directory;

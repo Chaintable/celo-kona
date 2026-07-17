@@ -163,6 +163,7 @@ pub struct CeloEvm<DB: Database, I, P = CeloPrecompiles> {
     inner: celo_revm::CeloEvm<DB, I, P>,
     inspect: bool,
     cip64_storage: Cip64Storage,
+    capture_cip64_info: bool,
     blocklist: FeeCurrencyBlocklist,
     /// Whether this EVM reads from and writes to the fee currency [`blocklist`](Self::blocklist).
     ///
@@ -220,6 +221,7 @@ impl<DB: Database, I, P> CeloEvm<DB, I, P> {
             inner: evm,
             inspect,
             cip64_storage: Cip64Storage::default(),
+            capture_cip64_info: false,
             blocklist: FeeCurrencyBlocklist::default(),
             blocklist_enabled: false,
         }
@@ -315,21 +317,19 @@ where
         match &result {
             Ok(_) => {
                 // CIP64 NOTE:
-                // Extract and store the cip64 info so the receipt builder can add the
-                // credit/debit logs when building the receipt. Store only on the real
-                // execution path, the only place `build_receipt` consumes it. We require both:
+                // Extract and store the CIP-64 info so the receipt builder can add the
+                // credit/debit logs when building the receipt. The normal execution path stores
+                // it for `build_receipt`; an explicitly configured tracing EVM stores it so its
+                // caller can recover the exact pre/main/post receipt-log split. We require:
                 //   - `base_fee_check_enabled`: RPC simulation (eth_call/estimateGas) disables the
                 //     base-fee check and never builds receipts.
-                //   - `!self.inspect`: tracing replays many txs through one shared, inspecting EVM
-                //     and never builds receipts. parity `trace_block`/`trace_filter` and otterscan
-                //     `ots_*` keep the base-fee check enabled, so without this conjunct the second
-                //     CIP-64 tx would trip the slot-occupied panic in `store_cip64_info`.
-                // Confining the store to the receipt-building path keeps that panic a true
-                // signal of an executor double-store bug (see `Cip64Storage` docs), rather than
-                // a false positive on legitimate tracing.
+                //   - either a non-inspecting execution path, or an inspecting EVM whose factory
+                //     opted into capture with `with_cip64_trace_storage`. The capture consumer pops
+                //     after every transaction, preserving `Cip64Storage`'s single-slot invariant;
+                //     ordinary tracing remains uncaptured and cannot fill the slot.
                 let cip64_info = self.inner.inner.0.ctx.tx.cip64_tx_info.take();
                 if base_fee_check_enabled
-                    && !self.inspect
+                    && (!self.inspect || self.capture_cip64_info)
                     && let Some(cip64_info) = cip64_info
                 {
                     self.cip64_storage.store_cip64_info(fee_currency, cip64_info);
@@ -441,10 +441,10 @@ where
 
 /// Factory producing [`CeloEvm`]s.
 ///
-/// Each EVM produced by this factory carries its own fresh [`Cip64Storage`]: the storage
-/// is owned by the EVM instance, not the factory, so two consumers (e.g. the main-chain
-/// executor and a re-executing ExEx) running through the same factory get independent
-/// slots and never overwrite each other's pending CIP-64 receipt data.
+/// By default each EVM produced by this factory carries its own fresh [`Cip64Storage`], so two
+/// execution consumers cannot overwrite each other's pending receipt data. A short-lived cloned
+/// factory may explicitly inject a storage handle for tracing; that handle is scoped to the
+/// caller's replay and is popped after every transaction.
 #[derive(Debug, Default, Clone)]
 pub struct CeloEvmFactory {
     /// Shared fee currency blocklist. EVMs created by this factory *populate* this blocklist
@@ -454,12 +454,22 @@ pub struct CeloEvmFactory {
     /// such currencies. `transact_raw` itself never rejects blocklisted currencies. Defaults to
     /// empty.
     pub blocklist: FeeCurrencyBlocklist,
+    trace_cip64_storage: Option<Cip64Storage>,
 }
 
 impl CeloEvmFactory {
     /// Sets the shared fee currency blocklist.
     pub fn with_blocklist(mut self, blocklist: FeeCurrencyBlocklist) -> Self {
         self.blocklist = blocklist;
+        self
+    }
+
+    /// Captures CIP-64 execution metadata into `storage` for a short-lived tracing replay.
+    ///
+    /// The caller must consume the pending entry after every transaction. Normal block execution
+    /// and ordinary RPC tracing do not configure this and retain per-EVM isolated storage.
+    pub fn with_cip64_trace_storage(mut self, storage: Cip64Storage) -> Self {
+        self.trace_cip64_storage = Some(storage);
         self
     }
 }
@@ -482,6 +492,7 @@ fn make_test_evm(
             .with_precompiles(CeloPrecompiles::new_with_spec(spec_id)),
         inspect: false,
         cip64_storage: Cip64Storage::default(),
+        capture_cip64_info: false,
         blocklist,
         // Tests here exercise the sequencing-path blocklist behaviour, so enable it. The
         // RPC-simulation test additionally disables the base-fee check, which the
@@ -501,6 +512,8 @@ impl CeloEvmFactory {
     ) -> CeloEvm<DB, I, PrecompilesMap> {
         input.cfg_env.limit_contract_code_size = Some(constants::CELO_MAX_CODE_SIZE);
         let spec_id = input.cfg_env.spec;
+        let trace_cip64_storage = inspect.then(|| self.trace_cip64_storage.clone()).flatten();
+        let capture_cip64_info = trace_cip64_storage.is_some();
         CeloEvm {
             inner: Context::celo()
                 .with_db(db)
@@ -510,7 +523,8 @@ impl CeloEvmFactory {
                 .build_celo_with_inspector(inspector)
                 .with_precompiles(celo_precompiles_map(spec_id)),
             inspect,
-            cip64_storage: Cip64Storage::default(),
+            cip64_storage: trace_cip64_storage.unwrap_or_default(),
+            capture_cip64_info,
             blocklist: self.blocklist.clone(),
             // Off by default: the import/derivation executor and RPC create EVMs through the
             // factory and must not touch the blocklist. Sequencing flips it on via
@@ -845,6 +859,35 @@ mod tests {
         );
     }
 
+    /// The DeBank block replay opts into a short-lived shared slot and pops it after each traced
+    /// transaction, allowing it to recover the exact pre/post fee-log split.
+    #[test]
+    fn test_cip64_info_captured_for_opted_in_inspection() {
+        use revm::state::AccountInfo;
+
+        let blocklist = FeeCurrencyBlocklist::default();
+        let mut evm = make_test_evm(blocklist);
+        let trace_storage = Cip64Storage::default();
+        evm.cip64_storage = trace_storage.clone();
+        evm.capture_cip64_info = true;
+        evm.set_inspector_enabled(true);
+
+        let caller = Address::with_last_byte(0x01);
+        evm.db_mut().insert_account_info(
+            caller,
+            AccountInfo { balance: U256::from(10u128.pow(20)), nonce: 0, ..Default::default() },
+        );
+
+        let mut tx = make_cip64_tx(Address::ZERO);
+        tx.fee_currency = Some(Address::ZERO);
+        let result = evm.transact_raw(tx);
+        assert!(result.is_ok(), "captured inspecting tx should succeed: {result:?}");
+        assert!(
+            trace_storage.pop_cip64_receipt_data().is_some(),
+            "opted-in tracing must expose CIP-64 execution metadata"
+        );
+    }
+
     /// Two [`CeloEvm`] instances produced by the same [`CeloEvmFactory`] must own
     /// independent [`Cip64Storage`] slots. This is the regression for #183: when
     /// the proofs-history ExEx re-executes blocks through the same factory, its
@@ -871,6 +914,28 @@ mod tests {
             evm_a.cip64_storage().pop_cip64_receipt_data().is_some(),
             "first EVM's slot must still hold its own entry"
         );
+    }
+
+    #[test]
+    fn tracing_factory_uses_injected_cip64_storage() {
+        let storage = Cip64Storage::default();
+        let factory = CeloEvmFactory::default().with_cip64_trace_storage(storage.clone());
+        let normal_evm = factory
+            .create_evm(revm::database::InMemoryDB::default(), EvmEnv::<OpSpecId>::default());
+        normal_evm.cip64_storage().store_cip64_info(None, celo_revm::Cip64Info::default());
+        assert!(
+            storage.pop_cip64_receipt_data().is_none(),
+            "trace storage must not leak into a non-inspecting EVM"
+        );
+
+        let evm = factory.create_evm_with_inspector(
+            revm::database::InMemoryDB::default(),
+            EvmEnv::<OpSpecId>::default(),
+            revm::inspector::NoOpInspector {},
+        );
+
+        evm.cip64_storage().store_cip64_info(None, celo_revm::Cip64Info::default());
+        assert!(storage.pop_cip64_receipt_data().is_some());
     }
 
     /// Verify that the blocklist is NOT enforced during RPC simulation
