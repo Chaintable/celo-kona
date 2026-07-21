@@ -327,7 +327,7 @@ fn is_non_native_cip64(tx: &CeloTxEnvelope) -> bool {
 fn event_matches_log(event: &DebankEvent, log: &alloy_rpc_types_eth::Log) -> bool {
     event.contract_id == log.address() &&
         event.selector == log.topic0().map(ToString::to_string).unwrap_or_default() &&
-        event.topics == log.topics()[1..].iter().map(ToString::to_string).collect::<Vec<_>>() &&
+        event.topics == log.topics().iter().skip(1).map(ToString::to_string).collect::<Vec<_>>() &&
         event.data == log.data().data
 }
 
@@ -470,7 +470,7 @@ fn receipt_log_to_event(
     DebankEvent {
         contract_id: log.address(),
         selector: log.topic0().map(ToString::to_string).unwrap_or_default(),
-        topics: log.topics()[1..].iter().map(ToString::to_string).collect(),
+        topics: log.topics().iter().skip(1).map(ToString::to_string).collect(),
         data: log.data().data.clone(),
         parent_trace_id,
         pos_in_parent_trace,
@@ -627,6 +627,34 @@ mod tests {
             log_index: Some(log_index),
             ..Default::default()
         }
+    }
+
+    fn rpc_log_without_topics(
+        address: Address,
+        data: &[u8],
+        log_index: u64,
+    ) -> alloy_rpc_types_eth::Log {
+        alloy_rpc_types_eth::Log {
+            inner: alloy_primitives::Log {
+                address,
+                data: LogData::new_unchecked(vec![], Bytes::copy_from_slice(data)),
+            },
+            log_index: Some(log_index),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn receipt_log_without_topics_is_converted_and_matched_without_panicking() {
+        let address = Address::with_last_byte(1);
+        let log = rpc_log_without_topics(address, b"anonymous", 4);
+        let event = receipt_log_to_event(&log, "root".to_string(), 0, 4);
+
+        assert_eq!(event.contract_id, address);
+        assert!(event.selector.is_empty());
+        assert!(event.topics.is_empty());
+        assert_eq!(event.data, Bytes::from_static(b"anonymous"));
+        assert!(event_matches_log(&event, &log));
     }
 
     #[test]
