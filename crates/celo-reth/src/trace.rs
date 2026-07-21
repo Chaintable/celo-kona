@@ -293,6 +293,26 @@ struct Cip64LogSplit {
 
 type TraceResult = (TraceEntry, Option<Cip64LogSplit>);
 
+/// Converts the captured CIP-64 log buckets into the canonical receipt split.
+///
+/// The committing credit system call deliberately takes the enclosing journal's logs when it
+/// builds its execution result. Consequently, `Cip64Info::logs_post` contains the successful
+/// main-execution logs followed by the actual credit-hook logs. `TracingInspector` supplies the
+/// successful main-log count, so subtract it before treating the remainder as hidden post logs.
+fn cip64_log_split(
+    pre_logs: usize,
+    captured_post_logs: usize,
+    inspector_main_logs: usize,
+) -> Result<Cip64LogSplit, String> {
+    let post = captured_post_logs.checked_sub(inspector_main_logs).ok_or_else(|| {
+        format!(
+            "invalid CIP-64 captured-log split: {captured_post_logs} captured post logs, \
+             {inspector_main_logs} inspector main logs"
+        )
+    })?;
+    Ok(Cip64LogSplit { pre: pre_logs, post })
+}
+
 fn is_non_native_cip64(tx: &CeloTxEnvelope) -> bool {
     matches!(
         tx,
@@ -517,8 +537,6 @@ where
 
     eth.spawn_blocking_io_fut(move |this| async move {
         let block_hash = block.hash();
-        let block_number: u64 = evm_env.block_env.number().saturating_to();
-        let base_fee = evm_env.block_env.basefee();
 
         let post_state = this.state_at_block_id(block_hash.into()).await?;
         let exec_state = this.state_at_block_id(parent_hash.into()).await?;
@@ -531,7 +549,6 @@ where
         this.apply_pre_execution_changes(&block, &mut db)?;
 
         let log_index_cell = std::cell::RefCell::new(0usize);
-        let mut idx = 0u64;
 
         let mut trace_cfg = TracingInspectorConfig::default_parity()
             .set_steps(true)
@@ -548,26 +565,27 @@ where
         let results: Vec<TraceResult> = trace_factory
             .create_tracer(&mut db, evm_env, TracingInspector::new(trace_cfg))
             .try_trace_many(block.transactions_recovered(), |mut ctx| {
-                use alloy_rpc_types_eth::TransactionInfo;
-                let tx_info = TransactionInfo {
-                    hash: Some(*ctx.tx.tx_hash()),
-                    index: Some(idx),
-                    block_hash: Some(block_hash),
-                    block_number: Some(block_number),
-                    base_fee: Some(base_fee),
-                    block_timestamp: Some(block.timestamp()),
-                };
-                idx += 1;
+                let tx_hash = *ctx.tx.tx_hash();
                 let traces = build_debank_traces(
-                    tx_info.hash.unwrap(),
+                    tx_hash,
                     ctx.take_inspector().into_traces(),
                     &log_index_cell,
                 );
-                let split =
-                    trace_cip64_storage.pop_cip64_receipt_data().map(|data| Cip64LogSplit {
-                        pre: data.cip64_info.logs_pre.len(),
-                        post: data.cip64_info.logs_post.len(),
-                    });
+                let split = trace_cip64_storage
+                    .pop_cip64_receipt_data()
+                    .map(|data| {
+                        cip64_log_split(
+                            data.cip64_info.logs_pre.len(),
+                            data.cip64_info.logs_post.len(),
+                            traces.2.len(),
+                        )
+                        .map_err(|err| {
+                            Eth::Error::from_eth_err(EthApiError::EvmCustom(format!(
+                                "{tx_hash}: {err}"
+                            )))
+                        })
+                    })
+                    .transpose()?;
                 Ok::<_, Eth::Error>((traces, split))
             })
             .commit_last_tx()
@@ -651,6 +669,56 @@ mod tests {
             1
         );
         assert!(entry.0[0].storage_change);
+    }
+
+    #[test]
+    fn reconcile_receipt_events_accounts_for_main_logs_captured_in_post_bucket() {
+        let root_id = "root".to_string();
+        let root = DebankTrace { id: root_id.clone(), trace_address: vec![], ..Default::default() };
+
+        let receipt_logs = [
+            rpc_log(Address::with_last_byte(1), B256::with_last_byte(1), b"pre", 7),
+            rpc_log(Address::with_last_byte(2), B256::with_last_byte(2), b"main-1", 8),
+            rpc_log(Address::with_last_byte(3), B256::with_last_byte(3), b"main-2", 9),
+            rpc_log(Address::with_last_byte(4), B256::with_last_byte(4), b"main-3", 10),
+            rpc_log(Address::with_last_byte(5), B256::with_last_byte(5), b"post-1", 11),
+            rpc_log(Address::with_last_byte(6), B256::with_last_byte(6), b"post-2", 12),
+            rpc_log(Address::with_last_byte(7), B256::with_last_byte(7), b"post-3", 13),
+        ];
+        let main_events: Vec<DebankEvent> = receipt_logs[1..4]
+            .iter()
+            .enumerate()
+            .map(|(position, log)| {
+                let mut event = DebankEvent {
+                    contract_id: log.address(),
+                    selector: log.topic0().unwrap().to_string(),
+                    data: log.data().data.clone(),
+                    parent_trace_id: root_id.clone(),
+                    pos_in_parent_trace: position,
+                    ..Default::default()
+                };
+                event.id = event.debank_id();
+                event
+            })
+            .collect();
+        let mut entry = (vec![root], vec![], main_events, vec![]);
+
+        // The handler's captured post bucket contains main-1..3 followed by post-1..3.
+        let split = cip64_log_split(1, 6, entry.2.len()).unwrap();
+        assert_eq!(split, Cip64LogSplit { pre: 1, post: 3 });
+        reconcile_receipt_events(&mut entry, &receipt_logs, true, 7, Some(split)).unwrap();
+
+        assert_eq!(entry.2.len(), 7);
+        assert_eq!(
+            entry.2.iter().map(|event| event.idx).collect::<Vec<_>>(),
+            (7..14).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn cip64_log_split_rejects_fewer_captured_logs_than_inspector_logs() {
+        let err = cip64_log_split(1, 2, 3).unwrap_err();
+        assert!(err.contains("2 captured post logs, 3 inspector main logs"));
     }
 
     #[test]
