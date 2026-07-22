@@ -313,6 +313,23 @@ fn cip64_log_split(
     Ok(Cip64LogSplit { pre: pre_logs, post })
 }
 
+/// Returns a hidden-log split only for CIP-64 transactions that actually pay fees in ERC-20.
+///
+/// Native-fee CIP-64 transactions also carry a minimal `Cip64Info` so their receipt can encode
+/// the base fee, but they execute no debit/credit hooks. Their inspector logs are therefore the
+/// complete main logs and must not be subtracted from the empty `logs_post` bucket.
+fn captured_cip64_log_split(
+    fee_currency: Option<alloy_primitives::Address>,
+    pre_logs: usize,
+    captured_post_logs: usize,
+    inspector_main_logs: usize,
+) -> Result<Option<Cip64LogSplit>, String> {
+    if fee_currency.is_none_or(|currency| currency == alloy_primitives::Address::ZERO) {
+        return Ok(None);
+    }
+    cip64_log_split(pre_logs, captured_post_logs, inspector_main_logs).map(Some)
+}
+
 fn is_non_native_cip64(tx: &CeloTxEnvelope) -> bool {
     matches!(
         tx,
@@ -571,21 +588,20 @@ where
                     ctx.take_inspector().into_traces(),
                     &log_index_cell,
                 );
-                let split = trace_cip64_storage
-                    .pop_cip64_receipt_data()
-                    .map(|data| {
-                        cip64_log_split(
-                            data.cip64_info.logs_pre.len(),
-                            data.cip64_info.logs_post.len(),
-                            traces.2.len(),
-                        )
-                        .map_err(|err| {
-                            Eth::Error::from_eth_err(EthApiError::EvmCustom(format!(
-                                "{tx_hash}: {err}"
-                            )))
-                        })
-                    })
-                    .transpose()?;
+                let split = match trace_cip64_storage.pop_cip64_receipt_data() {
+                    Some(data) => captured_cip64_log_split(
+                        data.fee_currency,
+                        data.cip64_info.logs_pre.len(),
+                        data.cip64_info.logs_post.len(),
+                        traces.2.len(),
+                    )
+                    .map_err(|err| {
+                        Eth::Error::from_eth_err(EthApiError::EvmCustom(format!(
+                            "{tx_hash}: {err}"
+                        )))
+                    })?,
+                    None => None,
+                };
                 Ok::<_, Eth::Error>((traces, split))
             })
             .commit_last_tx()
@@ -747,6 +763,23 @@ mod tests {
     fn cip64_log_split_rejects_fewer_captured_logs_than_inspector_logs() {
         let err = cip64_log_split(1, 2, 3).unwrap_err();
         assert!(err.contains("2 captured post logs, 3 inspector main logs"));
+    }
+
+    #[test]
+    fn captured_cip64_log_split_ignores_native_fee_metadata() {
+        assert_eq!(captured_cip64_log_split(None, 0, 0, 1).unwrap(), None);
+        assert_eq!(
+            captured_cip64_log_split(Some(Address::ZERO), 0, 0, 1).unwrap(),
+            None
+        );
+    }
+
+    #[test]
+    fn captured_cip64_log_split_keeps_erc20_fee_hooks() {
+        assert_eq!(
+            captured_cip64_log_split(Some(Address::with_last_byte(1)), 1, 6, 3).unwrap(),
+            Some(Cip64LogSplit { pre: 1, post: 3 })
+        );
     }
 
     #[test]
