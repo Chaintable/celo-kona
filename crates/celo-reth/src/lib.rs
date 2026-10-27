@@ -22,21 +22,25 @@ use {
     reth_tracing as _, reth_transaction_pool as _, tracing as _,
 };
 
-use alloc::sync::Arc;
+use alloc::{boxed::Box, format, sync::Arc};
 use alloy_consensus::{BlockHeader, Header};
 use alloy_evm::{FromRecoveredTx, FromTxWithEncoded};
 use alloy_op_evm::block::receipt_builder::OpReceiptBuilder;
+use alloy_primitives::U256;
+use core::any::Any;
 use op_alloy_consensus::EIP1559ParamError;
 use op_revm::OpSpecId;
 use reth_chainspec::EthChainSpec;
 use reth_evm::{
-    BlockExecutorForEvm, ConfigureEvm, Database, EvmEnv,
+    BlockExecutorForEvm, CallerGasAllowanceError, ConfigureEvm, Database, EvmEnv, EvmEnvFor,
+    EvmFor, InspectorFor, TxEnvFor,
     eth::NextEvmEnvAttributes,
     execute::{BasicBlockBuilder, BlockBuilder, BlockExecutor},
 };
 use reth_optimism_chainspec::OpChainSpec;
 use reth_optimism_forks::OpHardforks;
 use reth_primitives_traits::{NodePrimitives, SealedBlock, SealedHeader, SignedTransaction};
+use revm::context::Transaction;
 
 pub mod primitives;
 pub mod receipt;
@@ -50,6 +54,9 @@ pub mod pool;
 
 #[cfg(feature = "std")]
 pub mod payload;
+
+#[cfg(feature = "std")]
+pub mod payload_metrics;
 
 #[cfg(feature = "std")]
 pub mod rpc;
@@ -98,12 +105,17 @@ use reth_optimism_primitives::DepositReceipt;
 
 #[cfg(feature = "std")]
 use {
-    reth_evm::{ConfigureEngineEvm, EvmEnvFor, ExecutableTxIterator, ExecutionCtxFor},
+    reth_evm::{ConfigureEngineEvm, ExecutableTxIterator, ExecutionCtxFor},
     reth_optimism_payload_builder::OpExecData,
     reth_primitives_traits::TxTy,
 };
 
 pub use celo_revm::constants::CELO_EIP_1559_BASE_FEE_FLOOR as CELO_BASE_FEE_FLOOR;
+
+/// Gas limit for the `balanceOf` read behind a CIP-64 gas allowance. The token is caller-chosen,
+/// so the read must not get the 30M system-call default; 1M is the bound the pool validator uses
+/// for the same call.
+const FEE_BALANCE_READ_GAS_LIMIT: u64 = 1_000_000;
 
 /// Compute the next block's base fee for Celo.
 ///
@@ -284,6 +296,82 @@ where
         ))
     }
 
+    /// Captures the block-start [`celo_revm::FeeCurrencyContext`] for mid-block call simulations.
+    ///
+    /// Fee-currency exchange rates are block-scoped consensus state: every transaction of a
+    /// block settles at the rates read from block-start state. Capturing the context here lets
+    /// the debug API seed it into call EVMs created over mid-block state (`debug_traceCall` with
+    /// a transaction index, `debug_traceCallMany`), which would otherwise re-load the rates from
+    /// the wrong state.
+    fn capture_block_replay_ctx<DB: Database>(
+        &self,
+        db: &mut DB,
+        evm_env: &EvmEnvFor<Self>,
+    ) -> Option<Box<dyn Any + Send>> {
+        let mut evm = self.evm_with_env(&mut *db, evm_env.clone());
+        Some(Box::new(evm.create_fee_currency_context()))
+    }
+
+    /// Seeds a mid-block call simulation EVM with the captured block-start fee currency context.
+    ///
+    /// The context's `updated_at_block` stamp makes the CIP-64 handler skip its lazy per-block
+    /// load only while the EVM's block environment still matches the captured block; the debug
+    /// API re-captures per simulated block (e.g. per `debug_traceCallMany` bundle).
+    fn seed_block_replay_ctx<DB, I>(&self, evm: &mut EvmFor<Self, DB, I>, ctx: &(dyn Any + Send))
+    where
+        DB: Database,
+        I: InspectorFor<Self, DB>,
+    {
+        if let Some(fee_currency_context) = ctx.downcast_ref::<celo_revm::FeeCurrencyContext>() {
+            evm.set_fee_currency_context(fee_currency_context.clone());
+        }
+    }
+
+    /// A CIP-64 request pays gas in its fee currency, so the allowance is the caller's ERC20
+    /// balance divided by the fee-currency cap. `value` still moves native CELO: it must fit the
+    /// native balance, but it is not taken out of the fee balance. Native requests divide the
+    /// native balance less `value`, as the default does. Mirrors op-geth's estimator.
+    fn caller_gas_allowance<DB: Database>(
+        &self,
+        db: &mut DB,
+        evm_env: &EvmEnvFor<Self>,
+        tx_env: &TxEnvFor<Self>,
+    ) -> Result<u64, CallerGasAllowanceError<DB::Error>> {
+        let caller = tx_env.caller();
+        let value = tx_env.value();
+        let native_balance = db
+            .basic(caller)
+            .map_err(CallerGasAllowanceError::Database)?
+            .map(|account| account.balance)
+            .unwrap_or_default();
+        let Some(native_spendable) = native_balance.checked_sub(value) else {
+            return Err(CallerGasAllowanceError::InsufficientFunds {
+                cost: value,
+                balance: native_balance,
+            });
+        };
+
+        let spendable = match tx_env.fee_currency {
+            None => native_spendable,
+            Some(fee_currency) => {
+                let mut evm = self.evm_with_env(&mut *db, evm_env.clone());
+                evm.erc20_balance(fee_currency, caller, FEE_BALANCE_READ_GAS_LIMIT).map_err(
+                    |err| {
+                        CallerGasAllowanceError::FeeBalance(format!(
+                            "balanceOf({caller}) on fee currency {fee_currency} failed: {err}"
+                        ))
+                    },
+                )?
+            }
+        };
+
+        Ok(spendable
+            .checked_div(U256::from(tx_env.gas_price()))
+            // Zero when the gas price is zero; callers only ask with a non-zero price.
+            .unwrap_or_default()
+            .saturating_to())
+    }
+
     fn context_for_block(
         &self,
         block: &'_ SealedBlock<N::Block>,
@@ -313,10 +401,11 @@ where
 
     /// Builds a block builder for the next block, i.e. the **sequencing** path: reth routes the
     /// payload builder through this method, while block import and derivation re-execution build
-    /// their EVMs directly via `evm_with_env` + `create_executor` and never reach it. This is the
-    /// one place that enables the fee currency blocklist (`CeloEvm::with_blocklist_enabled`), so
-    /// blocklist reads/writes are confined to sequencing — import and derivation leave the shared
-    /// blocklist untouched. Otherwise identical to the default `ConfigureEvm` implementation.
+    /// their EVMs directly via `evm_with_env` + `create_executor` and never reach it. Together
+    /// with the dormant `post_exec_builder_for_next_block`, this is where the fee currency
+    /// blocklist is enabled (`CeloEvm::with_blocklist_enabled`), so blocklist reads/writes are
+    /// confined to sequencing — import and derivation leave the shared blocklist untouched.
+    /// Otherwise identical to the default `ConfigureEvm` implementation.
     fn builder_for_next_block<'a, DB: Database + 'a>(
         &'a self,
         db: &'a mut revm::database::State<DB>,
@@ -329,7 +418,13 @@ where
         let evm_env = self.next_evm_env(parent, &attributes)?;
         let evm = self.evm_with_env(db, evm_env).with_blocklist_enabled();
         let ctx = self.context_for_next_block(parent, attributes)?;
-        Ok(self.create_block_builder(evm, parent, ctx))
+        let builder = self.create_block_builder(evm, parent, ctx);
+        // Sequencing-only observability: the decorator is transparent, and it emits nothing
+        // unless a `PayloadMetricsBuilder` attempt is active on this thread. no-std proof
+        // builds return the bare builder.
+        #[cfg(feature = "std")]
+        let builder = crate::payload_metrics::PayloadMetricsBlockBuilder::new(builder);
+        Ok(builder)
     }
 }
 
@@ -371,7 +466,9 @@ where
         + 'a,
         Self::Error,
     > {
-        let evm = self.evm_for_block(db, block.header())?;
+        // Receipt-building executor built outside `create_executor`, so enable CIP-64 receipt
+        // storage as that path does. Dormant on Celo (SDM unscheduled).
+        let evm = self.evm_for_block(db, block.header())?.with_cip64_store_enabled();
         let ctx = self.context_for_block_with_post_exec_mode(block, Some(post_exec_mode));
         // Bind a fresh receipt builder to this EVM's per-instance CIP-64 storage.
         let builder = R::from(evm.cip64_storage().clone());
@@ -397,22 +494,28 @@ where
     > {
         let evm_env = self.next_evm_env(parent, &attributes)?;
         // Next-block (sequencing-side) builder, so enable the blocklist like
-        // `builder_for_next_block`. Dormant on Celo: SDM/post-exec is unscheduled, so this
-        // path is never actually driven.
-        let evm = self.evm_with_env(db, evm_env).with_blocklist_enabled();
+        // `builder_for_next_block`, and CIP-64 receipt storage like `create_executor`. Dormant on
+        // Celo: SDM/post-exec is unscheduled, so this path is never actually driven.
+        let evm =
+            self.evm_with_env(db, evm_env).with_blocklist_enabled().with_cip64_store_enabled();
         let ctx =
             self.context_for_next_block_with_post_exec_mode(parent, attributes, post_exec_mode);
         let builder = R::from(evm.cip64_storage().clone());
         let executor =
             OpBlockExecutor::new(evm, ctx.clone(), self.executor_factory.spec(), builder);
 
-        Ok(BasicBlockBuilder::<'a, CeloBlockExecutorFactory<R, Arc<ChainSpec>>, _, _, N> {
+        let builder = BasicBlockBuilder::<'a, CeloBlockExecutorFactory<R, Arc<ChainSpec>>, _, _, N> {
             executor,
             transactions: alloc::vec::Vec::new(),
             ctx,
             parent,
             assembler: self.block_assembler(),
-        })
+        };
+        // Same sequencing-side instrumentation as `builder_for_next_block`; see there for the
+        // std-only rationale.
+        #[cfg(feature = "std")]
+        let builder = crate::payload_metrics::PayloadMetricsBlockBuilder::new(builder);
+        Ok(builder)
     }
 }
 
@@ -542,6 +645,111 @@ mod tests {
                 .jovian_activated()
                 .build(),
         )
+    }
+
+    mod caller_gas_allowance {
+        use super::*;
+        use alloy_primitives::{Address, Bytes, hex};
+        use celo_revm::CeloTransaction;
+        use core::convert::Infallible;
+        use op_revm::OpTransaction;
+        use revm::{
+            context::TxEnv,
+            database::InMemoryDB,
+            state::{AccountInfo, Bytecode},
+        };
+
+        const CALLER: Address = Address::with_last_byte(0xCA);
+        const TOKEN: Address = Address::with_last_byte(0x70);
+        const GAS_PRICE: u128 = 10;
+
+        /// Stand-in for `balanceOf`: answers every call with storage slot 0.
+        const SLOT0_RETURNER: &[u8] = &hex!("60005460005260206000f3");
+
+        fn db(native_balance: U256, fee_balance: Option<U256>) -> InMemoryDB {
+            let mut db = InMemoryDB::default();
+            db.insert_account_info(
+                CALLER,
+                AccountInfo { balance: native_balance, ..Default::default() },
+            );
+            if let Some(fee_balance) = fee_balance {
+                let code = Bytecode::new_raw(Bytes::from_static(SLOT0_RETURNER));
+                db.insert_account_info(
+                    TOKEN,
+                    AccountInfo {
+                        code_hash: code.hash_slow(),
+                        code: Some(code),
+                        ..Default::default()
+                    },
+                );
+                db.insert_account_storage(TOKEN, U256::ZERO, fee_balance).unwrap();
+            }
+            db
+        }
+
+        fn tx_env(fee_currency: Option<Address>, value: U256) -> CeloTransaction<TxEnv> {
+            let mut tx = CeloTransaction::new(OpTransaction {
+                base: TxEnv { caller: CALLER, gas_price: GAS_PRICE, value, ..Default::default() },
+                enveloped_tx: Some(Bytes::new()),
+                deposit: Default::default(),
+            });
+            tx.fee_currency = fee_currency;
+            tx
+        }
+
+        fn allowance(
+            db: &mut InMemoryDB,
+            tx: &CeloTransaction<TxEnv>,
+        ) -> Result<u64, CallerGasAllowanceError<Infallible>> {
+            CeloEvmConfig::celo(pre_jovian_chain_spec()).caller_gas_allowance(
+                db,
+                &EvmEnv::default(),
+                tx,
+            )
+        }
+
+        #[test]
+        fn native_request_divides_native_balance_less_value() {
+            let mut db = db(U256::from(1_000), None);
+            assert_eq!(allowance(&mut db, &tx_env(None, U256::from(100))).unwrap(), 90);
+        }
+
+        /// The fee is paid in the currency, so a caller without any CELO is fine.
+        #[test]
+        fn cip64_request_divides_fee_currency_balance() {
+            let mut db = db(U256::ZERO, Some(U256::from(5_000)));
+            assert_eq!(allowance(&mut db, &tx_env(Some(TOKEN), U256::ZERO)).unwrap(), 500);
+        }
+
+        #[test]
+        fn cip64_value_must_fit_the_native_balance() {
+            let mut db = db(U256::from(50), Some(U256::from(5_000)));
+            let err = allowance(&mut db, &tx_env(Some(TOKEN), U256::from(100))).unwrap_err();
+            assert!(matches!(
+                err,
+                CallerGasAllowanceError::InsufficientFunds { cost, balance }
+                    if cost == U256::from(100) && balance == U256::from(50)
+            ));
+        }
+
+        #[test]
+        fn cip64_value_is_not_taken_from_the_fee_balance() {
+            let mut db = db(U256::from(1_000), Some(U256::from(5_000)));
+            assert_eq!(allowance(&mut db, &tx_env(Some(TOKEN), U256::from(100))).unwrap(), 500);
+        }
+
+        /// No code at the token, so `balanceOf` yields nothing to decode. The error names the
+        /// token and the caller and does not guess at why the read failed.
+        #[test]
+        fn cip64_unreadable_fee_balance_is_an_error_naming_the_token() {
+            let mut db = db(U256::ZERO, None);
+            let err = allowance(&mut db, &tx_env(Some(TOKEN), U256::ZERO)).unwrap_err();
+            assert!(
+                matches!(&err, CallerGasAllowanceError::FeeBalance(msg)
+                    if msg.contains(&format!("{TOKEN}")) && msg.contains(&format!("{CALLER}"))),
+                "{err}"
+            );
+        }
     }
 
     #[test]

@@ -1,6 +1,7 @@
 //! Celo reth node binary.
 
 use alloy_celo_evm::blocklist::FeeCurrencyBlocklist;
+use alloy_primitives::Address;
 use celo_reth::{
     CeloEvmConfig,
     celo_migrate_v2::CeloMigrateV2Command,
@@ -25,9 +26,13 @@ use clap::{ArgMatches, CommandFactory, FromArgMatches, Parser};
 use futures_util::FutureExt;
 use reth_chainspec::EthChainSpec;
 use reth_cli_commands::{
-    common::EnvironmentArgs, db, download::DownloadCommand, p2p, prune, re_execute, stage,
+    common::EnvironmentArgs,
+    db,
+    download::{DownloadCommand, DownloadDefaults},
+    p2p, prune, re_execute, stage,
 };
 use reth_cli_runner::CliRunner;
+use reth_cli_util::parse_duration_from_secs_or_ms;
 use reth_db::DatabaseEnv;
 use reth_db_api::database_metrics::DatabaseMetrics;
 use reth_node_builder::{FullNodeComponents, NodeBuilder, WithLaunchContext};
@@ -50,7 +55,7 @@ use reth_optimism_trie::{
 use reth_rpc_server_types::RethRpcModule;
 use reth_tasks::TaskExecutor;
 use reth_tracing::{FileWorkerGuard, Layers};
-use std::{ffi::OsString, sync::Arc, time::Duration};
+use std::{collections::HashMap, ffi::OsString, sync::Arc, time::Duration};
 use tokio::time::sleep;
 use tracing::{info, warn};
 
@@ -99,6 +104,13 @@ const DEFAULT_MANIFEST_URL_SEPOLIA: &str = "https://snapshots.celo.org/celo-sepo
 /// `--chain-id` default of `1` (Ethereum mainnet).
 const DEFAULT_CHAIN_ID: &str = "42220";
 
+/// Public snapshot root for `celo-reth download` snapshot discovery — `--list-snapshots` and the
+/// latest-snapshot auto-discovery (used when no `--url` / `--manifest-url` / `--manifest-path` is
+/// given). Overrides the upstream Ethereum-only `snapshots.reth.rs`; the discovery API is derived
+/// as `<SNAPSHOTS_SOURCE_URL>/api/snapshots`, a JSON index that must be published alongside the
+/// snapshots for `--list-snapshots` to return results. Wired up in [`init_celo_download_defaults`].
+const SNAPSHOTS_SOURCE_URL: &str = "https://snapshots.celo.org";
+
 /// Top-level Celo-only subcommand wrapper.
 ///
 /// Used only when intercepting Celo-owned paths from the binary's argv before handing the rest of
@@ -138,7 +150,8 @@ enum CeloCommand {
     ReExecute(re_execute::Command<CeloChainSpecParser>),
     /// Download a Celo reth snapshot. Defaults `--manifest-url` to the cLabs-operated
     /// `snapshots.celo.org` endpoint for the selected `--chain` (Mainnet or Celo Sepolia);
-    /// pass `--url`, `--manifest-url`, or `--manifest-path` to override.
+    /// pass `--url`, `--manifest-url`, or `--manifest-path` to override. `--list-snapshots`
+    /// lists available Celo snapshots from `snapshots.celo.org`.
     #[command(name = DOWNLOAD)]
     Download(Box<DownloadCommand<CeloChainSpecParser>>),
     /// Generate a chunked snapshot manifest from a local datadir (publisher tool).
@@ -201,6 +214,18 @@ pub struct CeloArgs {
     #[command(flatten)]
     pub rollup: RollupArgs,
 
+    /// How long the payload builder waits for the shared sparse trie before falling back to a
+    /// synchronous state-root calculation. Defaults to 750ms.
+    ///
+    /// This only takes effect when `--engine.share-sparse-trie-with-payload-builder` is enabled,
+    /// non-legacy state-root mode is active, and reth detects at least five available CPUs.
+    #[arg(
+        long = "builder.state-root-wait",
+        value_name = "DURATION",
+        value_parser = parse_duration_from_secs_or_ms,
+    )]
+    pub payload_state_root_wait: Option<Duration>,
+
     /// Per-fee-currency block space limits as fraction of block gas.
     ///
     /// Format: `address=fraction,address=fraction,...`
@@ -219,6 +244,29 @@ pub struct CeloArgs {
         value_parser = parse_fee_currency_fraction,
     )]
     pub fee_currency_default: f64,
+}
+
+/// Renders fee currency limits as `address=fraction,...`, sorted by address.
+///
+/// Sorted because `HashMap` iteration order is nondeterministic. The output uses the syntax
+/// [`FeeCurrencyLimits::parse_limits`] accepts, so a logged value pastes back into
+/// `--celo.feecurrency.limits`.
+fn render_fee_currency_limits(limits: &HashMap<Address, f64>) -> String {
+    let mut entries: Vec<(&Address, &f64)> = limits.iter().collect();
+    entries.sort_unstable_by_key(|(addr, _)| *addr);
+    entries.iter().map(|(addr, frac)| format!("{addr}={frac}")).collect::<Vec<_>>().join(",")
+}
+
+/// Rejects shared sparse-trie configurations that Reth would silently leave inactive.
+fn validate_shared_sparse_trie(
+    share_sparse_trie_with_payload_builder: bool,
+    use_state_root_task: bool,
+) -> eyre::Result<()> {
+    eyre::ensure!(
+        !share_sparse_trie_with_payload_builder || use_state_root_task,
+        "--engine.share-sparse-trie-with-payload-builder requires non-legacy state-root mode and at least five available CPUs"
+    );
+    Ok(())
 }
 
 /// Augment reth's version metadata with the celo-kona git SHA so `celo-reth --version` shows
@@ -244,8 +292,24 @@ fn init_celo_version_metadata() {
     let _ = try_init_version_metadata(meta);
 }
 
+/// Point `celo-reth download`'s snapshot discovery at the cLabs-operated `snapshots.celo.org`
+/// endpoint instead of the upstream Ethereum-only `snapshots.reth.rs`.
+///
+/// This drives `--list-snapshots` and the "latest snapshot" auto-discovery (both GET
+/// `<source>/api/snapshots`), plus the generated `--url` help text. It is independent of the
+/// `--manifest-url` default set in [`celo_cli_command`], which the normal download path uses — a
+/// download with an explicit or defaulted `--manifest-url` never consults this discovery API, so
+/// this only affects `--list-snapshots` and no-URL discovery.
+///
+/// The underlying global is a [`OnceLock`](std::sync::OnceLock), so the first call wins; the `Err`
+/// (already-set) case is ignored for safety in tests / other entry points.
+fn init_celo_download_defaults() {
+    let _ = DownloadDefaults::default().with_snapshot_source_url(SNAPSHOTS_SOURCE_URL).try_init();
+}
+
 fn main() {
     init_celo_version_metadata();
+    init_celo_download_defaults();
     reth_cli_util::sigsegv_handler::install();
 
     if std::env::var_os("RUST_BACKTRACE").is_none() {
@@ -280,11 +344,17 @@ fn main() {
 
     if let Err(err) =
         Cli::<CeloChainSpecParser, CeloArgs>::parse().run(async move |builder, celo_args| {
+            let engine_args = &builder.config().engine;
+            validate_shared_sparse_trie(
+                engine_args.share_sparse_trie_with_payload_builder,
+                engine_args.tree_config().use_state_root_task(),
+            )?;
+
             let rollup_args = celo_args.rollup;
 
             // Parse fee currency limits from CLI args.
             // If no explicit limits are provided, fall back to the chain's
-            // built-in defaults (op-geth-matching for mainnet; empty elsewhere).
+            // built-in defaults (mainnet and Celo Sepolia; empty elsewhere).
             let chain_id = builder.config().chain.chain().id();
             let limits = celo_args.fee_currency_limits.as_deref().map_or_else(
                 || FeeCurrencyLimits::defaults_for_chain(chain_id),
@@ -292,6 +362,25 @@ fn main() {
             );
             let fee_currency_limits =
                 FeeCurrencyLimits { limits, default_limit: celo_args.fee_currency_default };
+
+            // A registered currency missing from this map takes `default_limit` with no other
+            // signal, and a key that names no registered currency is inert. Both are easy to
+            // cause: `--celo.feecurrency.limits` replaces the chain defaults rather than merging
+            // into them, and drops malformed entries silently. Log the resolved map so the
+            // operator can see what actually took effect.
+            let limits_source = if celo_args.fee_currency_limits.is_some() {
+                "--celo.feecurrency.limits"
+            } else {
+                "chain defaults"
+            };
+            info!(
+                target: "celo::payload",
+                chain_id,
+                source = limits_source,
+                default_limit = fee_currency_limits.default_limit,
+                limits = %render_fee_currency_limits(&fee_currency_limits.limits),
+                "Resolved fee currency block space limits"
+            );
 
             // Snapshot the historical-proofs fields before we move rollup_args
             // into CeloNode::new. Mirrors the OP launcher pattern in
@@ -310,6 +399,11 @@ fn main() {
             let node = CeloNode::new(rollup_args)
                 .with_blocklist(blocklist.clone())
                 .with_fee_currency_limits(fee_currency_limits);
+            let node = if let Some(wait) = celo_args.payload_state_root_wait {
+                node.with_payload_state_root_wait(wait)
+            } else {
+                node
+            };
 
             // Historical-proofs ExEx (Bounded History Sidecar). When --proofs-history is
             // set, dispatch on the on-disk schema version (--proofs-history.storage-version)
@@ -673,4 +767,63 @@ fn spawn_proofs_db_metrics<S>(
             storage.report_metrics();
         }
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::Args as _;
+
+    #[test]
+    fn test_builder_state_root_wait_accepts_duration_override() {
+        let matches = CeloArgs::augment_args(clap::Command::new("test"))
+            .try_get_matches_from(["test", "--builder.state-root-wait", "750ms"])
+            .expect("state-root wait override should parse");
+
+        assert_eq!(
+            matches.get_one::<Duration>("payload_state_root_wait"),
+            Some(&Duration::from_millis(750)),
+        );
+    }
+
+    #[test]
+    fn test_shared_sparse_trie_requires_state_root_task() {
+        assert!(validate_shared_sparse_trie(false, false).is_ok());
+        assert!(validate_shared_sparse_trie(true, true).is_ok());
+
+        let err = validate_shared_sparse_trie(true, false).unwrap_err();
+        assert!(
+            err.to_string().contains("at least five available CPUs"),
+            "unexpected error: {err}"
+        );
+    }
+
+    /// The Celo download source URL must derive the `/api/snapshots` discovery endpoint that
+    /// `--list-snapshots` (and latest-snapshot auto-discovery) query, so the CLI lists Celo
+    /// snapshots from `snapshots.celo.org` instead of the upstream Ethereum-only
+    /// `snapshots.reth.rs`.
+    #[test]
+    fn test_celo_download_source_derives_celo_snapshot_api() {
+        let defaults = DownloadDefaults::default().with_snapshot_source_url(SNAPSHOTS_SOURCE_URL);
+        assert_eq!(defaults.snapshot_api_url.as_ref(), "https://snapshots.celo.org/api/snapshots");
+    }
+
+    #[test]
+    fn test_render_fee_currency_limits_is_sorted_and_reparsable() {
+        let limits =
+            FeeCurrencyLimits::defaults_for_chain(celo_revm::constants::CELO_MAINNET_CHAIN_ID);
+        let rendered = render_fee_currency_limits(&limits);
+
+        let addrs: Vec<Address> =
+            rendered.split(',').map(|e| e.split_once('=').unwrap().0.parse().unwrap()).collect();
+        assert_eq!(addrs.len(), 5);
+        assert!(addrs.windows(2).all(|w| w[0] < w[1]), "not sorted by address: {rendered}");
+
+        assert_eq!(FeeCurrencyLimits::parse_limits(&rendered), limits);
+    }
+
+    #[test]
+    fn test_render_fee_currency_limits_of_an_empty_map_is_empty() {
+        assert_eq!(render_fee_currency_limits(&HashMap::new()), "");
+    }
 }
