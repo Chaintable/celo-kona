@@ -163,6 +163,7 @@ reth-consensus-common = { git = "https://github.com/paradigmxyz/reth", rev = "76
 reth-db = { git = "https://github.com/paradigmxyz/reth", rev = "7680d6d8a931c0af4f4eed26e971596970238b54" }
 reth-db-api = { git = "https://github.com/paradigmxyz/reth", rev = "7680d6d8a931c0af4f4eed26e971596970238b54" }
 reth-engine-local = { git = "https://github.com/paradigmxyz/reth", rev = "7680d6d8a931c0af4f4eed26e971596970238b54" }
+reth-eth-wire-types = { git = "https://github.com/paradigmxyz/reth", rev = "7680d6d8a931c0af4f4eed26e971596970238b54" }
 reth-evm = { git = "https://github.com/paradigmxyz/reth", rev = "7680d6d8a931c0af4f4eed26e971596970238b54", default-features = false }
 reth-execution-types = { git = "https://github.com/paradigmxyz/reth", rev = "7680d6d8a931c0af4f4eed26e971596970238b54", default-features = false }
 reth-node-api = { git = "https://github.com/paradigmxyz/reth", rev = "7680d6d8a931c0af4f4eed26e971596970238b54" }
@@ -177,6 +178,7 @@ reth-rpc-eth-types = { git = "https://github.com/paradigmxyz/reth", rev = "7680d
 reth-storage-api = { git = "https://github.com/paradigmxyz/reth", rev = "7680d6d8a931c0af4f4eed26e971596970238b54", default-features = false }
 reth-storage-errors = { git = "https://github.com/paradigmxyz/reth", rev = "7680d6d8a931c0af4f4eed26e971596970238b54", default-features = false }
 reth-trie = { git = "https://github.com/paradigmxyz/reth", rev = "7680d6d8a931c0af4f4eed26e971596970238b54" }
+reth-trie-common = { git = "https://github.com/paradigmxyz/reth", rev = "7680d6d8a931c0af4f4eed26e971596970238b54", default-features = false }
 reth-payload-util = { git = "https://github.com/paradigmxyz/reth", rev = "7680d6d8a931c0af4f4eed26e971596970238b54" }
 reth-transaction-pool = { git = "https://github.com/paradigmxyz/reth", rev = "7680d6d8a931c0af4f4eed26e971596970238b54" }
 reth-cli-commands = { git = "https://github.com/paradigmxyz/reth", rev = "7680d6d8a931c0af4f4eed26e971596970238b54" }
@@ -221,7 +223,7 @@ hokulea-host-bin = { git = "https://github.com/celo-org/hokulea", rev = "6217bcf
 
 # General
 url = { version = "2.5.8", default-features = false }
-spin = "0.10.0"
+spin = "0.10.1"
 clap = { version = "4.5.58", features = ["derive"] }
 tokio = { version = "1.49.0", default-features = false }
 futures-util = { version = "0.3.31", default-features = false }
@@ -294,13 +296,192 @@ alloy-eips = { git = "https://github.com/celo-org/alloy", branch = "fix-fake-exp
 # We also need to patch alloy-serde to this version since otherwise a different non patch version is also included in the project
 # which breaks trait bound satisfaction
 alloy-serde = { git = "https://github.com/celo-org/alloy", branch = "fix-fake-exponential-2.0.5" }
-# Pin op-alloy / alloy-op-* / op-revm to the optimism monorepo's in-tree copies
-# at the op-reth/v2.3.1 tag, so all kona/op-reth/op-alloy dependencies resolve
-# to a single source (the kona crates use the in-tree copies).
-op-alloy-consensus = { git = "https://github.com/ethereum-optimism/optimism", tag = "op-reth/v2.3.1" }
-op-alloy-rpc-types-engine = { git = "https://github.com/ethereum-optimism/optimism", tag = "op-reth/v2.3.1" }
-op-alloy-rpc-types = { git = "https://github.com/ethereum-optimism/optimism", tag = "op-reth/v2.3.1" }
-op-alloy-network = { git = "https://github.com/ethereum-optimism/optimism", tag = "op-reth/v2.3.1" }
-alloy-op-hardforks = { git = "https://github.com/ethereum-optimism/optimism", tag = "op-reth/v2.3.1" }
-alloy-op-evm = { git = "https://github.com/ethereum-optimism/optimism", tag = "op-reth/v2.3.1" }
-op-revm = { git = "https://github.com/ethereum-optimism/optimism", tag = "op-reth/v2.3.1" }
+# Pin op-alloy / alloy-op-* / op-revm to the same fork revision as the
+# Optimism git dependencies below, so all packages resolve from one source.
+op-alloy-consensus = { git = "https://github.com/celo-org/optimism", rev = "b08a8d0abda93536b105b0f013753d2f35c0d19e" }
+op-alloy-rpc-types-engine = { git = "https://github.com/celo-org/optimism", rev = "b08a8d0abda93536b105b0f013753d2f35c0d19e" }
+op-alloy-rpc-types = { git = "https://github.com/celo-org/optimism", rev = "b08a8d0abda93536b105b0f013753d2f35c0d19e" }
+op-alloy-network = { git = "https://github.com/celo-org/optimism", rev = "b08a8d0abda93536b105b0f013753d2f35c0d19e" }
+alloy-op-hardforks = { git = "https://github.com/celo-org/optimism", rev = "b08a8d0abda93536b105b0f013753d2f35c0d19e" }
+alloy-op-evm = { git = "https://github.com/celo-org/optimism", rev = "b08a8d0abda93536b105b0f013753d2f35c0d19e" }
+op-revm = { git = "https://github.com/celo-org/optimism", rev = "b08a8d0abda93536b105b0f013753d2f35c0d19e" }
+
+# This fork is the exact op-reth/v2.3.1 production pin plus six focused
+# commits: wire the engine's sparse-trie handle into the OP payload builder;
+# bound the wait, expose success/fallback metrics, and test the real path; and
+# route payload state reads through the engine's shared execution cache; and
+# expose the shared-trie wait duration by outcome; and reject non-canonical
+# transaction encodings (port of ethereum-optimism#22778); and forward
+# pre-migration eth_getBlockReceipts to the historical RPC (backport of
+# ethereum-optimism#21955).
+# Keep the pinned SHA reachable via the
+# `celo-kona/op-reth-v2.3.1-backports-v4` tag in celo-org/optimism, and
+# protect that tag from updates and deletion. The scoped fork-test workflow
+# verifies that the tag still resolves to this exact rev.
+# Patch each package still requested from the upstream git source so Cargo does
+# not create duplicate Optimism package identities in the dependency graph.
+[patch."https://github.com/ethereum-optimism/optimism"]
+kona-cli = { git = "https://github.com/celo-org/optimism", rev = "b08a8d0abda93536b105b0f013753d2f35c0d19e" }
+kona-client = { git = "https://github.com/celo-org/optimism", rev = "b08a8d0abda93536b105b0f013753d2f35c0d19e" }
+kona-derive = { git = "https://github.com/celo-org/optimism", rev = "b08a8d0abda93536b105b0f013753d2f35c0d19e" }
+kona-driver = { git = "https://github.com/celo-org/optimism", rev = "b08a8d0abda93536b105b0f013753d2f35c0d19e" }
+kona-executor = { git = "https://github.com/celo-org/optimism", rev = "b08a8d0abda93536b105b0f013753d2f35c0d19e" }
+kona-genesis = { git = "https://github.com/celo-org/optimism", rev = "b08a8d0abda93536b105b0f013753d2f35c0d19e" }
+kona-host = { git = "https://github.com/celo-org/optimism", rev = "b08a8d0abda93536b105b0f013753d2f35c0d19e" }
+kona-mpt = { git = "https://github.com/celo-org/optimism", rev = "b08a8d0abda93536b105b0f013753d2f35c0d19e" }
+kona-preimage = { git = "https://github.com/celo-org/optimism", rev = "b08a8d0abda93536b105b0f013753d2f35c0d19e" }
+kona-proof = { git = "https://github.com/celo-org/optimism", rev = "b08a8d0abda93536b105b0f013753d2f35c0d19e" }
+kona-protocol = { git = "https://github.com/celo-org/optimism", rev = "b08a8d0abda93536b105b0f013753d2f35c0d19e" }
+kona-providers-alloy = { git = "https://github.com/celo-org/optimism", rev = "b08a8d0abda93536b105b0f013753d2f35c0d19e" }
+kona-registry = { git = "https://github.com/celo-org/optimism", rev = "b08a8d0abda93536b105b0f013753d2f35c0d19e" }
+kona-std-fpvm = { git = "https://github.com/celo-org/optimism", rev = "b08a8d0abda93536b105b0f013753d2f35c0d19e" }
+kona-std-fpvm-proc = { git = "https://github.com/celo-org/optimism", rev = "b08a8d0abda93536b105b0f013753d2f35c0d19e" }
+reth-optimism-chainspec = { git = "https://github.com/celo-org/optimism", rev = "b08a8d0abda93536b105b0f013753d2f35c0d19e" }
+reth-optimism-cli = { git = "https://github.com/celo-org/optimism", rev = "b08a8d0abda93536b105b0f013753d2f35c0d19e" }
+reth-optimism-consensus = { git = "https://github.com/celo-org/optimism", rev = "b08a8d0abda93536b105b0f013753d2f35c0d19e" }
+reth-optimism-evm = { git = "https://github.com/celo-org/optimism", rev = "b08a8d0abda93536b105b0f013753d2f35c0d19e" }
+reth-optimism-exex = { git = "https://github.com/celo-org/optimism", rev = "b08a8d0abda93536b105b0f013753d2f35c0d19e" }
+reth-optimism-forks = { git = "https://github.com/celo-org/optimism", rev = "b08a8d0abda93536b105b0f013753d2f35c0d19e" }
+reth-optimism-node = { git = "https://github.com/celo-org/optimism", rev = "b08a8d0abda93536b105b0f013753d2f35c0d19e" }
+reth-optimism-payload-builder = { git = "https://github.com/celo-org/optimism", rev = "b08a8d0abda93536b105b0f013753d2f35c0d19e" }
+reth-optimism-primitives = { git = "https://github.com/celo-org/optimism", rev = "b08a8d0abda93536b105b0f013753d2f35c0d19e" }
+reth-optimism-rpc = { git = "https://github.com/celo-org/optimism", rev = "b08a8d0abda93536b105b0f013753d2f35c0d19e" }
+reth-optimism-storage = { git = "https://github.com/celo-org/optimism", rev = "b08a8d0abda93536b105b0f013753d2f35c0d19e" }
+reth-optimism-trie = { git = "https://github.com/celo-org/optimism", rev = "b08a8d0abda93536b105b0f013753d2f35c0d19e" }
+reth-optimism-txpool = { git = "https://github.com/celo-org/optimism", rev = "b08a8d0abda93536b105b0f013753d2f35c0d19e" }
+
+# This temporary reth fork carries four independent changes:
+# 1. Single-EVM transaction replay for tracing RPCs (paradigmxyz/reth#26523).
+# 2. Celo's block-context capture/seed hook and its fresh-call integrations
+#    (`debug_traceCall`, `debug_traceCallMany`, `trace_callMany`, and
+#    `eth_callMany`), including the call-many bundle-boundary, override, and
+#    empty-bundle plumbing required to preserve capture/seed semantics.
+# 3. Cooperative cancellation of shared sparse-trie state-root tasks after a
+#    payload builder abandons their result and starts a synchronous fallback.
+# 4. The upstream state-root capability guard, so the engine does not create a
+#    payload sparse-trie handle when its state-root task is disabled.
+# On a reth upgrade that includes #26523, rebuild the fork from the new reth
+# revision without the duplicate single-EVM commits, then port the capture/seed
+# hook, fresh-call integrations, Celo-specific call-many plumbing, and sparse
+# trie cancellation and capability guard if they are not yet upstream.
+# Preserve the upstream stateful-EVM and inspector-fusing regression tests. Do
+# not remove this patch merely because #26523 landed; it is still needed until
+# all remaining fork changes are upstream or no longer required by Celo.
+#
+# The fork also carries `ConfigureEvm::caller_gas_allowance`, a defaulted hook
+# that lets the EVM config decide which balance pays for gas when
+# `eth_estimateGas` / `eth_call` cap a request's gas limit. It is generic and
+# proposed upstream; drop it once the pinned revision includes it.
+#
+# The fork also carries a backport of the fee recheck from
+# paradigmxyz/reth#26956: when a gap fill promotes a queued descendant, its fee
+# cap is rechecked against the tracked base fee, so a transaction priced below
+# it cannot reach the pending sub-pool. Drop this backport when the fork is
+# rebuilt on a reth revision that contains #26956; upstream then carries the
+# same recheck.
+#
+# The patch must cover every reth crate in the graph so the op-reth git deps
+# unify with the fork. On a rev bump, regenerate this list from the reth
+# packages Cargo.lock resolves from this git source.
+# Keep the pinned SHA reachable via the
+# `celo-kona/reth-v1.0-celo-hooks-v3` tag in celo-org/reth, and protect
+# that tag from updates and deletion. The scoped fork-test workflow verifies
+# that the tag still resolves to this exact rev.
+[patch."https://github.com/paradigmxyz/reth"]
+reth-basic-payload-builder = { git = "https://github.com/celo-org/reth", rev = "06140ff8fb4d96861580c2c13dead90dbc0fb707" }
+reth-chain-state = { git = "https://github.com/celo-org/reth", rev = "06140ff8fb4d96861580c2c13dead90dbc0fb707" }
+reth-chainspec = { git = "https://github.com/celo-org/reth", rev = "06140ff8fb4d96861580c2c13dead90dbc0fb707" }
+reth-cli = { git = "https://github.com/celo-org/reth", rev = "06140ff8fb4d96861580c2c13dead90dbc0fb707" }
+reth-cli-commands = { git = "https://github.com/celo-org/reth", rev = "06140ff8fb4d96861580c2c13dead90dbc0fb707" }
+reth-cli-runner = { git = "https://github.com/celo-org/reth", rev = "06140ff8fb4d96861580c2c13dead90dbc0fb707" }
+reth-cli-util = { git = "https://github.com/celo-org/reth", rev = "06140ff8fb4d96861580c2c13dead90dbc0fb707" }
+reth-config = { git = "https://github.com/celo-org/reth", rev = "06140ff8fb4d96861580c2c13dead90dbc0fb707" }
+reth-consensus = { git = "https://github.com/celo-org/reth", rev = "06140ff8fb4d96861580c2c13dead90dbc0fb707" }
+reth-consensus-common = { git = "https://github.com/celo-org/reth", rev = "06140ff8fb4d96861580c2c13dead90dbc0fb707" }
+reth-consensus-debug-client = { git = "https://github.com/celo-org/reth", rev = "06140ff8fb4d96861580c2c13dead90dbc0fb707" }
+reth-db = { git = "https://github.com/celo-org/reth", rev = "06140ff8fb4d96861580c2c13dead90dbc0fb707" }
+reth-db-api = { git = "https://github.com/celo-org/reth", rev = "06140ff8fb4d96861580c2c13dead90dbc0fb707" }
+reth-db-common = { git = "https://github.com/celo-org/reth", rev = "06140ff8fb4d96861580c2c13dead90dbc0fb707" }
+reth-db-models = { git = "https://github.com/celo-org/reth", rev = "06140ff8fb4d96861580c2c13dead90dbc0fb707" }
+reth-discv4 = { git = "https://github.com/celo-org/reth", rev = "06140ff8fb4d96861580c2c13dead90dbc0fb707" }
+reth-discv5 = { git = "https://github.com/celo-org/reth", rev = "06140ff8fb4d96861580c2c13dead90dbc0fb707" }
+reth-dns-discovery = { git = "https://github.com/celo-org/reth", rev = "06140ff8fb4d96861580c2c13dead90dbc0fb707" }
+reth-downloaders = { git = "https://github.com/celo-org/reth", rev = "06140ff8fb4d96861580c2c13dead90dbc0fb707" }
+reth-ecies = { git = "https://github.com/celo-org/reth", rev = "06140ff8fb4d96861580c2c13dead90dbc0fb707" }
+reth-engine-local = { git = "https://github.com/celo-org/reth", rev = "06140ff8fb4d96861580c2c13dead90dbc0fb707" }
+reth-engine-primitives = { git = "https://github.com/celo-org/reth", rev = "06140ff8fb4d96861580c2c13dead90dbc0fb707" }
+reth-engine-tree = { git = "https://github.com/celo-org/reth", rev = "06140ff8fb4d96861580c2c13dead90dbc0fb707" }
+reth-engine-util = { git = "https://github.com/celo-org/reth", rev = "06140ff8fb4d96861580c2c13dead90dbc0fb707" }
+reth-era = { git = "https://github.com/celo-org/reth", rev = "06140ff8fb4d96861580c2c13dead90dbc0fb707" }
+reth-era-downloader = { git = "https://github.com/celo-org/reth", rev = "06140ff8fb4d96861580c2c13dead90dbc0fb707" }
+reth-era-utils = { git = "https://github.com/celo-org/reth", rev = "06140ff8fb4d96861580c2c13dead90dbc0fb707" }
+reth-errors = { git = "https://github.com/celo-org/reth", rev = "06140ff8fb4d96861580c2c13dead90dbc0fb707" }
+reth-eth-wire = { git = "https://github.com/celo-org/reth", rev = "06140ff8fb4d96861580c2c13dead90dbc0fb707" }
+reth-eth-wire-types = { git = "https://github.com/celo-org/reth", rev = "06140ff8fb4d96861580c2c13dead90dbc0fb707" }
+reth-ethereum-engine-primitives = { git = "https://github.com/celo-org/reth", rev = "06140ff8fb4d96861580c2c13dead90dbc0fb707" }
+reth-ethereum-forks = { git = "https://github.com/celo-org/reth", rev = "06140ff8fb4d96861580c2c13dead90dbc0fb707" }
+reth-ethereum-primitives = { git = "https://github.com/celo-org/reth", rev = "06140ff8fb4d96861580c2c13dead90dbc0fb707" }
+reth-etl = { git = "https://github.com/celo-org/reth", rev = "06140ff8fb4d96861580c2c13dead90dbc0fb707" }
+reth-evm = { git = "https://github.com/celo-org/reth", rev = "06140ff8fb4d96861580c2c13dead90dbc0fb707" }
+reth-evm-ethereum = { git = "https://github.com/celo-org/reth", rev = "06140ff8fb4d96861580c2c13dead90dbc0fb707" }
+reth-execution-cache = { git = "https://github.com/celo-org/reth", rev = "06140ff8fb4d96861580c2c13dead90dbc0fb707" }
+reth-execution-errors = { git = "https://github.com/celo-org/reth", rev = "06140ff8fb4d96861580c2c13dead90dbc0fb707" }
+reth-execution-types = { git = "https://github.com/celo-org/reth", rev = "06140ff8fb4d96861580c2c13dead90dbc0fb707" }
+reth-exex = { git = "https://github.com/celo-org/reth", rev = "06140ff8fb4d96861580c2c13dead90dbc0fb707" }
+reth-exex-types = { git = "https://github.com/celo-org/reth", rev = "06140ff8fb4d96861580c2c13dead90dbc0fb707" }
+reth-fs-util = { git = "https://github.com/celo-org/reth", rev = "06140ff8fb4d96861580c2c13dead90dbc0fb707" }
+reth-invalid-block-hooks = { git = "https://github.com/celo-org/reth", rev = "06140ff8fb4d96861580c2c13dead90dbc0fb707" }
+reth-ipc = { git = "https://github.com/celo-org/reth", rev = "06140ff8fb4d96861580c2c13dead90dbc0fb707" }
+reth-libmdbx = { git = "https://github.com/celo-org/reth", rev = "06140ff8fb4d96861580c2c13dead90dbc0fb707" }
+reth-mdbx-sys = { git = "https://github.com/celo-org/reth", rev = "06140ff8fb4d96861580c2c13dead90dbc0fb707" }
+reth-metrics = { git = "https://github.com/celo-org/reth", rev = "06140ff8fb4d96861580c2c13dead90dbc0fb707" }
+reth-net-banlist = { git = "https://github.com/celo-org/reth", rev = "06140ff8fb4d96861580c2c13dead90dbc0fb707" }
+reth-net-nat = { git = "https://github.com/celo-org/reth", rev = "06140ff8fb4d96861580c2c13dead90dbc0fb707" }
+reth-network = { git = "https://github.com/celo-org/reth", rev = "06140ff8fb4d96861580c2c13dead90dbc0fb707" }
+reth-network-api = { git = "https://github.com/celo-org/reth", rev = "06140ff8fb4d96861580c2c13dead90dbc0fb707" }
+reth-network-p2p = { git = "https://github.com/celo-org/reth", rev = "06140ff8fb4d96861580c2c13dead90dbc0fb707" }
+reth-network-peers = { git = "https://github.com/celo-org/reth", rev = "06140ff8fb4d96861580c2c13dead90dbc0fb707" }
+reth-network-types = { git = "https://github.com/celo-org/reth", rev = "06140ff8fb4d96861580c2c13dead90dbc0fb707" }
+reth-nippy-jar = { git = "https://github.com/celo-org/reth", rev = "06140ff8fb4d96861580c2c13dead90dbc0fb707" }
+reth-node-api = { git = "https://github.com/celo-org/reth", rev = "06140ff8fb4d96861580c2c13dead90dbc0fb707" }
+reth-node-builder = { git = "https://github.com/celo-org/reth", rev = "06140ff8fb4d96861580c2c13dead90dbc0fb707" }
+reth-node-core = { git = "https://github.com/celo-org/reth", rev = "06140ff8fb4d96861580c2c13dead90dbc0fb707" }
+reth-node-ethstats = { git = "https://github.com/celo-org/reth", rev = "06140ff8fb4d96861580c2c13dead90dbc0fb707" }
+reth-node-events = { git = "https://github.com/celo-org/reth", rev = "06140ff8fb4d96861580c2c13dead90dbc0fb707" }
+reth-node-metrics = { git = "https://github.com/celo-org/reth", rev = "06140ff8fb4d96861580c2c13dead90dbc0fb707" }
+reth-node-types = { git = "https://github.com/celo-org/reth", rev = "06140ff8fb4d96861580c2c13dead90dbc0fb707" }
+reth-payload-builder = { git = "https://github.com/celo-org/reth", rev = "06140ff8fb4d96861580c2c13dead90dbc0fb707" }
+reth-payload-builder-primitives = { git = "https://github.com/celo-org/reth", rev = "06140ff8fb4d96861580c2c13dead90dbc0fb707" }
+reth-payload-primitives = { git = "https://github.com/celo-org/reth", rev = "06140ff8fb4d96861580c2c13dead90dbc0fb707" }
+reth-payload-util = { git = "https://github.com/celo-org/reth", rev = "06140ff8fb4d96861580c2c13dead90dbc0fb707" }
+reth-payload-validator = { git = "https://github.com/celo-org/reth", rev = "06140ff8fb4d96861580c2c13dead90dbc0fb707" }
+reth-provider = { git = "https://github.com/celo-org/reth", rev = "06140ff8fb4d96861580c2c13dead90dbc0fb707" }
+reth-prune = { git = "https://github.com/celo-org/reth", rev = "06140ff8fb4d96861580c2c13dead90dbc0fb707" }
+reth-prune-types = { git = "https://github.com/celo-org/reth", rev = "06140ff8fb4d96861580c2c13dead90dbc0fb707" }
+reth-revm = { git = "https://github.com/celo-org/reth", rev = "06140ff8fb4d96861580c2c13dead90dbc0fb707" }
+reth-rpc = { git = "https://github.com/celo-org/reth", rev = "06140ff8fb4d96861580c2c13dead90dbc0fb707" }
+reth-rpc-api = { git = "https://github.com/celo-org/reth", rev = "06140ff8fb4d96861580c2c13dead90dbc0fb707" }
+reth-rpc-builder = { git = "https://github.com/celo-org/reth", rev = "06140ff8fb4d96861580c2c13dead90dbc0fb707" }
+reth-rpc-convert = { git = "https://github.com/celo-org/reth", rev = "06140ff8fb4d96861580c2c13dead90dbc0fb707" }
+reth-rpc-engine-api = { git = "https://github.com/celo-org/reth", rev = "06140ff8fb4d96861580c2c13dead90dbc0fb707" }
+reth-rpc-eth-api = { git = "https://github.com/celo-org/reth", rev = "06140ff8fb4d96861580c2c13dead90dbc0fb707" }
+reth-rpc-eth-types = { git = "https://github.com/celo-org/reth", rev = "06140ff8fb4d96861580c2c13dead90dbc0fb707" }
+reth-rpc-layer = { git = "https://github.com/celo-org/reth", rev = "06140ff8fb4d96861580c2c13dead90dbc0fb707" }
+reth-rpc-server-types = { git = "https://github.com/celo-org/reth", rev = "06140ff8fb4d96861580c2c13dead90dbc0fb707" }
+reth-stages = { git = "https://github.com/celo-org/reth", rev = "06140ff8fb4d96861580c2c13dead90dbc0fb707" }
+reth-stages-api = { git = "https://github.com/celo-org/reth", rev = "06140ff8fb4d96861580c2c13dead90dbc0fb707" }
+reth-stages-types = { git = "https://github.com/celo-org/reth", rev = "06140ff8fb4d96861580c2c13dead90dbc0fb707" }
+reth-static-file = { git = "https://github.com/celo-org/reth", rev = "06140ff8fb4d96861580c2c13dead90dbc0fb707" }
+reth-static-file-types = { git = "https://github.com/celo-org/reth", rev = "06140ff8fb4d96861580c2c13dead90dbc0fb707" }
+reth-storage-api = { git = "https://github.com/celo-org/reth", rev = "06140ff8fb4d96861580c2c13dead90dbc0fb707" }
+reth-storage-errors = { git = "https://github.com/celo-org/reth", rev = "06140ff8fb4d96861580c2c13dead90dbc0fb707" }
+reth-tasks = { git = "https://github.com/celo-org/reth", rev = "06140ff8fb4d96861580c2c13dead90dbc0fb707" }
+reth-tokio-util = { git = "https://github.com/celo-org/reth", rev = "06140ff8fb4d96861580c2c13dead90dbc0fb707" }
+reth-tracing = { git = "https://github.com/celo-org/reth", rev = "06140ff8fb4d96861580c2c13dead90dbc0fb707" }
+reth-tracing-otlp = { git = "https://github.com/celo-org/reth", rev = "06140ff8fb4d96861580c2c13dead90dbc0fb707" }
+reth-transaction-pool = { git = "https://github.com/celo-org/reth", rev = "06140ff8fb4d96861580c2c13dead90dbc0fb707" }
+reth-trie = { git = "https://github.com/celo-org/reth", rev = "06140ff8fb4d96861580c2c13dead90dbc0fb707" }
+reth-trie-common = { git = "https://github.com/celo-org/reth", rev = "06140ff8fb4d96861580c2c13dead90dbc0fb707" }
+reth-trie-db = { git = "https://github.com/celo-org/reth", rev = "06140ff8fb4d96861580c2c13dead90dbc0fb707" }
+reth-trie-parallel = { git = "https://github.com/celo-org/reth", rev = "06140ff8fb4d96861580c2c13dead90dbc0fb707" }
+reth-trie-sparse = { git = "https://github.com/celo-org/reth", rev = "06140ff8fb4d96861580c2c13dead90dbc0fb707" }

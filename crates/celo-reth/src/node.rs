@@ -3,7 +3,11 @@
 use crate::{
     CeloEvmConfig, celo_next_block_base_fee,
     payload::{CeloPayloadTransactions, FeeCurrencyLimits},
-    pool::{CeloExchangeRateApplier, CeloPoolMaintainer, CeloPoolTx},
+    payload_metrics::PayloadMetricsBuilderBuilder,
+    pool::{
+        CeloExchangeRateApplier, CeloPoolMaintainer, CeloPoolTx, CeloTransactionPool,
+        NextBlockBaseFeeFn, PooledFcCostsFn,
+    },
     primitives::{CeloBlock, CeloPrimitives},
     rpc::CeloEthApiBuilder,
 };
@@ -47,9 +51,12 @@ use reth_optimism_storage::OpStorage;
 use reth_primitives_traits::{
     Block, GotExpected, RecoveredBlock, SealedBlock, SealedHeader, SignedTransaction,
 };
-use std::sync::Arc;
+use std::{sync::Arc, time::Duration};
 
 pub use reth_optimism_node::args::{ProofsStorageVersion, RollupArgs};
+
+/// Gives the shared sparse trie 750ms before allowing a synchronous state-root fallback.
+const CELO_PAYLOAD_STATE_ROOT_WAIT: Duration = Duration::from_millis(750);
 
 // ---------------------------------------------------------------------------
 // CeloNode
@@ -61,6 +68,8 @@ pub use reth_optimism_node::args::{ProofsStorageVersion, RollupArgs};
 pub struct CeloNode {
     /// The inner OP node (shared args, DA config, etc.).
     pub args: RollupArgs,
+    /// Optional override for how long the payload builder waits for the shared sparse trie.
+    pub payload_state_root_wait: Option<Duration>,
     /// Shared fee currency blocklist for CIP-64 transactions.
     pub blocklist: alloy_celo_evm::blocklist::FeeCurrencyBlocklist,
     /// Per-fee-currency block space limits.
@@ -82,6 +91,7 @@ impl CeloNode {
     pub fn new(args: RollupArgs) -> Self {
         Self {
             args,
+            payload_state_root_wait: None,
             blocklist: Default::default(),
             fee_currency_limits: Default::default(),
             da_config: OpDAConfig::default(),
@@ -104,6 +114,12 @@ impl CeloNode {
         self
     }
 
+    /// Overrides how long the payload builder waits for the shared sparse trie.
+    pub const fn with_payload_state_root_wait(mut self, wait: Duration) -> Self {
+        self.payload_state_root_wait = Some(wait);
+        self
+    }
+
     /// Configure the data availability configuration for the payload builder.
     pub fn with_da_config(mut self, da_config: OpDAConfig) -> Self {
         self.da_config = da_config;
@@ -114,6 +130,19 @@ impl CeloNode {
     pub fn with_gas_limit_config(mut self, gas_limit_config: OpGasLimitConfig) -> Self {
         self.gas_limit_config = gas_limit_config;
         self
+    }
+
+    /// Creates the configured OP payload builder used by the node components.
+    fn payload_builder(&self) -> OpPayloadBuilder<CeloPayloadTransactions> {
+        let celo_txs =
+            CeloPayloadTransactions::new(self.fee_currency_limits.clone(), self.blocklist.clone());
+        OpPayloadBuilder::new(self.args.compute_pending_block)
+            .with_da_config(self.da_config.clone())
+            .with_gas_limit_config(self.gas_limit_config.clone())
+            .with_state_root_wait(Some(
+                self.payload_state_root_wait.unwrap_or(CELO_PAYLOAD_STATE_ROOT_WAIT),
+            ))
+            .with_transactions(celo_txs)
     }
 }
 
@@ -205,15 +234,17 @@ where
     Node::Provider: core::fmt::Debug + Send + Sync + 'static,
     Evm: reth_evm::ConfigureEvm<Primitives = CeloPrimitives> + Clone + 'static,
 {
-    type Pool = reth_transaction_pool::Pool<
-        reth_transaction_pool::TransactionValidationTaskExecutor<
-            CeloExchangeRateApplier<
-                reth_optimism_txpool::OpTransactionValidator<Node::Provider, CeloPoolTx, Evm>,
-                Node::Provider,
+    type Pool = CeloTransactionPool<
+        reth_transaction_pool::Pool<
+            reth_transaction_pool::TransactionValidationTaskExecutor<
+                CeloExchangeRateApplier<
+                    reth_optimism_txpool::OpTransactionValidator<Node::Provider, CeloPoolTx, Evm>,
+                    Node::Provider,
+                >,
             >,
+            reth_transaction_pool::CoinbaseTipOrdering<CeloPoolTx>,
+            reth_transaction_pool::blobstore::DiskFileBlobStore,
         >,
-        reth_transaction_pool::CoinbaseTipOrdering<CeloPoolTx>,
-        reth_transaction_pool::blobstore::DiskFileBlobStore,
     >;
 
     async fn build_pool(
@@ -226,6 +257,21 @@ where
         let fee_currency_directory =
             celo_revm::constants::get_addresses(chain_id).fee_currency_directory;
         let minimum_priority_fee = ctx.config().txpool.minimum_priority_fee.unwrap_or(1);
+
+        // The validator's live pooled-expenditure reader. The validator is
+        // constructed before the pool, so this is filled in right after the
+        // pool exists below; the validator reads it through the `OnceLock`.
+        let pooled_fc_costs: std::sync::Arc<std::sync::OnceLock<PooledFcCostsFn>> =
+            std::sync::Arc::new(std::sync::OnceLock::new());
+        let cs_spec = ctx.chain_spec();
+        let spec_fn: crate::pool::SpecFn = std::sync::Arc::new(move |next_ts: u64| {
+            reth_optimism_evm::revm_spec_by_timestamp_after_bedrock(&cs_spec, next_ts)
+        });
+        let cs_base_fee = ctx.chain_spec();
+        let next_block_base_fee_fn: NextBlockBaseFeeFn =
+            std::sync::Arc::new(move |parent: &alloy_consensus::Header, next_ts: u64| {
+                celo_next_block_base_fee(&cs_base_fee, parent, next_ts).unwrap_or_default()
+            });
 
         let blob_store = reth_node_builder::components::create_blob_store(ctx)?;
         let validator = reth_transaction_pool::TransactionValidationTaskExecutor::eth_builder(
@@ -300,54 +346,57 @@ where
                     _ => crate::CELO_BASE_FEE_FLOOR,
                 }
             };
-            // Mirror the base-fee floor: derive the active fork for the next block
-            // from the chain spec (refreshed each head block in `on_new_head_block`)
-            // so the pool's system-call EVM and the CIP-64 intrinsic-gas admission
-            // check track fork activations automatically. The block builder derives
-            // its spec the same way, so there is no hardcoded spec to update on a
-            // future hardfork.
-            let cs_spec = ctx.chain_spec();
-            let spec_fn: crate::pool::SpecFn = std::sync::Arc::new(move |next_ts: u64| {
-                reth_optimism_evm::revm_spec_by_timestamp_after_bedrock(&cs_spec, next_ts)
-            });
-            let spec = match ctx.provider().latest_header() {
-                Ok(Some(header)) => spec_fn(header.timestamp().saturating_add(1)),
-                // Fresh chain / read error: use the newest configured fork;
-                // `on_new_head_block` corrects it on the first canonical block.
-                _ => spec_fn(u64::MAX),
-            };
             CeloExchangeRateApplier::new(
                 validator,
                 ctx.provider().clone(),
                 fee_currency_directory,
                 base_fee_floor,
                 base_fee_floor_fn,
-                spec,
-                spec_fn,
+                spec_fn.clone(),
+                next_block_base_fee_fn.clone(),
                 minimum_priority_fee,
                 tx_fee_cap,
+                pooled_fc_costs.clone(),
             )
         });
 
         let final_pool_config = pool_config_overrides.apply(ctx.pool_config());
 
-        let transaction_pool = reth_node_builder::components::TxPoolBuilder::new(ctx)
+        let raw_pool = reth_node_builder::components::TxPoolBuilder::new(ctx)
             .with_validator(validator)
-            .build_and_spawn_maintenance_task(blob_store, final_pool_config)?;
+            .build(blob_store, final_pool_config.clone());
+        let raw_pool = Arc::new(raw_pool);
 
-        // Spawn Celo pool maintainer: evicts CIP-64 txs when their fee currency
-        // is deregistered from the FeeCurrencyDirectory.
+        // Wire the validator's live pooled-expenditure reader now that the pool
+        // exists (see `pooled_fc_costs_reader` for the accounting semantics).
+        // Infallible: this is the only `set` call and it runs once.
+        let _ = pooled_fc_costs.set(crate::pool::pooled_fc_costs_reader(raw_pool.clone()));
+
+        // All insertions, including backup reloads and canonical-chain
+        // reinjections, must pass through the Celo wrapper so same-sender
+        // validation and insertion stay serialized.
+        let transaction_pool = CeloTransactionPool::new(raw_pool);
+        reth_node_builder::components::spawn_maintenance_tasks(
+            ctx,
+            transaction_pool.clone(),
+            &final_pool_config,
+        )?;
+
+        // Spawn Celo pool maintainer: evicts CIP-64 txs when their fee currency is unusable
+        // or their sender can no longer cover the transaction's maximum fee-currency cost.
         {
-            use reth_provider::CanonStateSubscriptions;
-            let events = ctx.provider().subscribe_to_canonical_state();
+            let events = transaction_pool.subscribe_to_canonical_updates();
             let maintainer = CeloPoolMaintainer::new(
                 transaction_pool.clone(),
                 ctx.provider().clone(),
                 fee_currency_directory,
+                spec_fn,
+                next_block_base_fee_fn,
             );
+            let task_executor = ctx.task_executor().clone();
             ctx.task_executor().spawn_critical_task(
                 "celo pool fee currency maintainer",
-                Box::pin(maintainer.run(events)),
+                Box::pin(maintainer.run(events, task_executor)),
             );
         }
 
@@ -365,7 +414,9 @@ where
     type ComponentsBuilder = ComponentsBuilder<
         N,
         CeloPoolBuilder,
-        BasicPayloadServiceBuilder<OpPayloadBuilder<CeloPayloadTransactions>>,
+        BasicPayloadServiceBuilder<
+            PayloadMetricsBuilderBuilder<OpPayloadBuilder<CeloPayloadTransactions>>,
+        >,
         OpNetworkBuilder,
         CeloExecutorBuilder,
         CeloConsensusBuilder,
@@ -383,21 +434,15 @@ where
     >;
 
     fn components_builder(&self) -> Self::ComponentsBuilder {
-        let RollupArgs { disable_txpool_gossip, compute_pending_block, discovery_v4, .. } =
-            self.args;
+        let RollupArgs { disable_txpool_gossip, discovery_v4, .. } = self.args;
         let blocklist = self.blocklist.clone();
-        let celo_txs =
-            CeloPayloadTransactions::new(self.fee_currency_limits.clone(), blocklist.clone());
         ComponentsBuilder::default()
             .node_types::<N>()
             .pool(CeloPoolBuilder::default())
             .executor(CeloExecutorBuilder { blocklist })
-            .payload(BasicPayloadServiceBuilder::new(
-                OpPayloadBuilder::new(compute_pending_block)
-                    .with_da_config(self.da_config.clone())
-                    .with_gas_limit_config(self.gas_limit_config.clone())
-                    .with_transactions(celo_txs),
-            ))
+            .payload(BasicPayloadServiceBuilder::new(PayloadMetricsBuilderBuilder::new(
+                self.payload_builder(),
+            )))
             .network(OpNetworkBuilder::new(disable_txpool_gossip, !discovery_v4))
             .consensus(CeloConsensusBuilder)
     }
@@ -713,5 +758,27 @@ where
 
     async fn build_consensus(self, ctx: &BuilderContext<Node>) -> eyre::Result<Self::Consensus> {
         Ok(Arc::new(CeloConsensus::new(ctx.chain_spec())))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn payload_builder_defaults_state_root_wait_to_750ms() {
+        let builder = CeloNode::new(RollupArgs::default()).payload_builder();
+
+        assert_eq!(builder.state_root_wait, Some(Duration::from_millis(750)));
+    }
+
+    #[test]
+    fn payload_builder_uses_custom_state_root_wait() {
+        let wait = Duration::from_millis(750);
+        let builder = CeloNode::new(RollupArgs::default())
+            .with_payload_state_root_wait(wait)
+            .payload_builder();
+
+        assert_eq!(builder.state_root_wait, Some(wait));
     }
 }
