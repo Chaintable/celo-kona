@@ -293,6 +293,43 @@ struct Cip64LogSplit {
 
 type TraceResult = (TraceEntry, Option<Cip64LogSplit>);
 
+/// Converts the captured CIP-64 log buckets into the canonical receipt split.
+///
+/// The committing credit system call deliberately takes the enclosing journal's logs when it
+/// builds its execution result. Consequently, `Cip64Info::logs_post` contains the successful
+/// main-execution logs followed by the actual credit-hook logs. `TracingInspector` supplies the
+/// successful main-log count, so subtract it before treating the remainder as hidden post logs.
+fn cip64_log_split(
+    pre_logs: usize,
+    captured_post_logs: usize,
+    inspector_main_logs: usize,
+) -> Result<Cip64LogSplit, String> {
+    let post = captured_post_logs.checked_sub(inspector_main_logs).ok_or_else(|| {
+        format!(
+            "invalid CIP-64 captured-log split: {captured_post_logs} captured post logs, \
+             {inspector_main_logs} inspector main logs"
+        )
+    })?;
+    Ok(Cip64LogSplit { pre: pre_logs, post })
+}
+
+/// Returns a hidden-log split only for CIP-64 transactions that actually pay fees in ERC-20.
+///
+/// Native-fee CIP-64 transactions also carry a minimal `Cip64Info` so their receipt can encode
+/// the base fee, but they execute no debit/credit hooks. Their inspector logs are therefore the
+/// complete main logs and must not be subtracted from the empty `logs_post` bucket.
+fn captured_cip64_log_split(
+    fee_currency: Option<alloy_primitives::Address>,
+    pre_logs: usize,
+    captured_post_logs: usize,
+    inspector_main_logs: usize,
+) -> Result<Option<Cip64LogSplit>, String> {
+    if fee_currency.is_none_or(|currency| currency == alloy_primitives::Address::ZERO) {
+        return Ok(None);
+    }
+    cip64_log_split(pre_logs, captured_post_logs, inspector_main_logs).map(Some)
+}
+
 fn is_non_native_cip64(tx: &CeloTxEnvelope) -> bool {
     matches!(
         tx,
@@ -307,7 +344,7 @@ fn is_non_native_cip64(tx: &CeloTxEnvelope) -> bool {
 fn event_matches_log(event: &DebankEvent, log: &alloy_rpc_types_eth::Log) -> bool {
     event.contract_id == log.address() &&
         event.selector == log.topic0().map(ToString::to_string).unwrap_or_default() &&
-        event.topics == log.topics()[1..].iter().map(ToString::to_string).collect::<Vec<_>>() &&
+        event.topics == log.topics().iter().skip(1).map(ToString::to_string).collect::<Vec<_>>() &&
         event.data == log.data().data
 }
 
@@ -450,7 +487,7 @@ fn receipt_log_to_event(
     DebankEvent {
         contract_id: log.address(),
         selector: log.topic0().map(ToString::to_string).unwrap_or_default(),
-        topics: log.topics()[1..].iter().map(ToString::to_string).collect(),
+        topics: log.topics().iter().skip(1).map(ToString::to_string).collect(),
         data: log.data().data.clone(),
         parent_trace_id,
         pos_in_parent_trace,
@@ -517,8 +554,6 @@ where
 
     eth.spawn_blocking_io_fut(move |this| async move {
         let block_hash = block.hash();
-        let block_number: u64 = evm_env.block_env.number().saturating_to();
-        let base_fee = evm_env.block_env.basefee();
 
         let post_state = this.state_at_block_id(block_hash.into()).await?;
         let exec_state = this.state_at_block_id(parent_hash.into()).await?;
@@ -531,7 +566,6 @@ where
         this.apply_pre_execution_changes(&block, &mut db)?;
 
         let log_index_cell = std::cell::RefCell::new(0usize);
-        let mut idx = 0u64;
 
         let mut trace_cfg = TracingInspectorConfig::default_parity()
             .set_steps(true)
@@ -548,26 +582,26 @@ where
         let results: Vec<TraceResult> = trace_factory
             .create_tracer(&mut db, evm_env, TracingInspector::new(trace_cfg))
             .try_trace_many(block.transactions_recovered(), |mut ctx| {
-                use alloy_rpc_types_eth::TransactionInfo;
-                let tx_info = TransactionInfo {
-                    hash: Some(*ctx.tx.tx_hash()),
-                    index: Some(idx),
-                    block_hash: Some(block_hash),
-                    block_number: Some(block_number),
-                    base_fee: Some(base_fee),
-                    block_timestamp: Some(block.timestamp()),
-                };
-                idx += 1;
+                let tx_hash = *ctx.tx.tx_hash();
                 let traces = build_debank_traces(
-                    tx_info.hash.unwrap(),
+                    tx_hash,
                     ctx.take_inspector().into_traces(),
                     &log_index_cell,
                 );
-                let split =
-                    trace_cip64_storage.pop_cip64_receipt_data().map(|data| Cip64LogSplit {
-                        pre: data.cip64_info.logs_pre.len(),
-                        post: data.cip64_info.logs_post.len(),
-                    });
+                let split = match trace_cip64_storage.pop_cip64_receipt_data() {
+                    Some(data) => captured_cip64_log_split(
+                        data.fee_currency,
+                        data.cip64_info.logs_pre.len(),
+                        data.cip64_info.logs_post.len(),
+                        traces.2.len(),
+                    )
+                    .map_err(|err| {
+                        Eth::Error::from_eth_err(EthApiError::EvmCustom(format!(
+                            "{tx_hash}: {err}"
+                        )))
+                    })?,
+                    None => None,
+                };
                 Ok::<_, Eth::Error>((traces, split))
             })
             .commit_last_tx()
@@ -611,6 +645,34 @@ mod tests {
         }
     }
 
+    fn rpc_log_without_topics(
+        address: Address,
+        data: &[u8],
+        log_index: u64,
+    ) -> alloy_rpc_types_eth::Log {
+        alloy_rpc_types_eth::Log {
+            inner: alloy_primitives::Log {
+                address,
+                data: LogData::new_unchecked(vec![], Bytes::copy_from_slice(data)),
+            },
+            log_index: Some(log_index),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn receipt_log_without_topics_is_converted_and_matched_without_panicking() {
+        let address = Address::with_last_byte(1);
+        let log = rpc_log_without_topics(address, b"anonymous", 4);
+        let event = receipt_log_to_event(&log, "root".to_string(), 0, 4);
+
+        assert_eq!(event.contract_id, address);
+        assert!(event.selector.is_empty());
+        assert!(event.topics.is_empty());
+        assert_eq!(event.data, Bytes::from_static(b"anonymous"));
+        assert!(event_matches_log(&event, &log));
+    }
+
     #[test]
     fn reconcile_receipt_events_adds_hidden_cip64_logs_once() {
         let root_id = "root".to_string();
@@ -651,6 +713,73 @@ mod tests {
             1
         );
         assert!(entry.0[0].storage_change);
+    }
+
+    #[test]
+    fn reconcile_receipt_events_accounts_for_main_logs_captured_in_post_bucket() {
+        let root_id = "root".to_string();
+        let root = DebankTrace { id: root_id.clone(), trace_address: vec![], ..Default::default() };
+
+        let receipt_logs = [
+            rpc_log(Address::with_last_byte(1), B256::with_last_byte(1), b"pre", 7),
+            rpc_log(Address::with_last_byte(2), B256::with_last_byte(2), b"main-1", 8),
+            rpc_log(Address::with_last_byte(3), B256::with_last_byte(3), b"main-2", 9),
+            rpc_log(Address::with_last_byte(4), B256::with_last_byte(4), b"main-3", 10),
+            rpc_log(Address::with_last_byte(5), B256::with_last_byte(5), b"post-1", 11),
+            rpc_log(Address::with_last_byte(6), B256::with_last_byte(6), b"post-2", 12),
+            rpc_log(Address::with_last_byte(7), B256::with_last_byte(7), b"post-3", 13),
+        ];
+        let main_events: Vec<DebankEvent> = receipt_logs[1..4]
+            .iter()
+            .enumerate()
+            .map(|(position, log)| {
+                let mut event = DebankEvent {
+                    contract_id: log.address(),
+                    selector: log.topic0().unwrap().to_string(),
+                    data: log.data().data.clone(),
+                    parent_trace_id: root_id.clone(),
+                    pos_in_parent_trace: position,
+                    ..Default::default()
+                };
+                event.id = event.debank_id();
+                event
+            })
+            .collect();
+        let mut entry = (vec![root], vec![], main_events, vec![]);
+
+        // The handler's captured post bucket contains main-1..3 followed by post-1..3.
+        let split = cip64_log_split(1, 6, entry.2.len()).unwrap();
+        assert_eq!(split, Cip64LogSplit { pre: 1, post: 3 });
+        reconcile_receipt_events(&mut entry, &receipt_logs, true, 7, Some(split)).unwrap();
+
+        assert_eq!(entry.2.len(), 7);
+        assert_eq!(
+            entry.2.iter().map(|event| event.idx).collect::<Vec<_>>(),
+            (7..14).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn cip64_log_split_rejects_fewer_captured_logs_than_inspector_logs() {
+        let err = cip64_log_split(1, 2, 3).unwrap_err();
+        assert!(err.contains("2 captured post logs, 3 inspector main logs"));
+    }
+
+    #[test]
+    fn captured_cip64_log_split_ignores_native_fee_metadata() {
+        assert_eq!(captured_cip64_log_split(None, 0, 0, 1).unwrap(), None);
+        assert_eq!(
+            captured_cip64_log_split(Some(Address::ZERO), 0, 0, 1).unwrap(),
+            None
+        );
+    }
+
+    #[test]
+    fn captured_cip64_log_split_keeps_erc20_fee_hooks() {
+        assert_eq!(
+            captured_cip64_log_split(Some(Address::with_last_byte(1)), 1, 6, 3).unwrap(),
+            Some(Cip64LogSplit { pre: 1, post: 3 })
+        );
     }
 
     #[test]
