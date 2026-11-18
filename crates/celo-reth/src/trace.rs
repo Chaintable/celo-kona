@@ -439,6 +439,7 @@ fn reconcile_receipt_events(
     }
 
     let (traces, error_traces, events, error_events) = entry;
+    // Reserve debit-hook positions even when main execution has no root children.
     let mut next_position = traces
         .iter()
         .chain(error_traces.iter())
@@ -452,7 +453,7 @@ fn reconcile_receipt_events(
                 .map(|event| event.pos_in_parent_trace),
         )
         .max()
-        .map_or(0, |position| position + 1);
+        .map_or(main_start, |position| position + 1);
 
     for (position, log_index) in (0..main_start).enumerate() {
         let log = &receipt_logs[log_index];
@@ -671,6 +672,58 @@ mod tests {
         assert!(event.topics.is_empty());
         assert_eq!(event.data, Bytes::from_static(b"anonymous"));
         assert!(event_matches_log(&event, &log));
+    }
+
+    #[test]
+    fn reconcile_receipt_events_reserves_pre_positions_without_main_children() {
+        for (pre, post) in [(1, 2), (1, 3), (2, 3)] {
+            for reverted in [false, true] {
+                let root = DebankTrace {
+                    id: "root".to_string(),
+                    trace_address: vec![],
+                    ..Default::default()
+                };
+                let mut entry = if reverted {
+                    (vec![], vec![root], vec![], vec![])
+                } else {
+                    (vec![root], vec![], vec![], vec![])
+                };
+                let logs = (0..pre + post)
+                    .map(|index| {
+                        rpc_log(
+                            Address::with_last_byte(1),
+                            B256::with_last_byte(1),
+                            b"fee",
+                            (7 + index) as u64,
+                        )
+                    })
+                    .collect::<Vec<_>>();
+                reconcile_receipt_events(
+                    &mut entry,
+                    &logs,
+                    true,
+                    7,
+                    Some(Cip64LogSplit { pre, post }),
+                )
+                .unwrap();
+                assert_eq!(
+                    entry.2.iter().map(|event| event.pos_in_parent_trace).collect::<Vec<_>>(),
+                    (0..pre + post).collect::<Vec<_>>()
+                );
+                assert_eq!(
+                    entry
+                        .2
+                        .iter()
+                        .map(|event| &event.id)
+                        .collect::<std::collections::HashSet<_>>()
+                        .len(),
+                    logs.len()
+                );
+                assert!(
+                    entry.2.iter().zip(&logs).all(|(event, log)| event_matches_log(event, log))
+                );
+            }
+        }
     }
 
     #[test]
