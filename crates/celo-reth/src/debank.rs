@@ -762,6 +762,15 @@ pub fn build_debank_traces(
     (traces, error_traces, events, error_events)
 }
 
+/// Genesis IDs use one kind byte, eleven zero bytes, and the alloc address.
+/// Kinds: 1 = balance transfer, 2 = code creation, 3 = native token creation.
+fn genesis_tx_id(kind: u8, address: Address) -> String {
+    let mut id = [0; 32];
+    id[0] = kind;
+    id[12..].copy_from_slice(address.as_slice());
+    H256::from(id).to_string()
+}
+
 /// Build genesis transactions and traces from genesis alloc.
 pub fn build_genesis_txs_and_traces(
     genesis: &Genesis,
@@ -776,10 +785,9 @@ pub fn build_genesis_txs_and_traces(
 
     for addr in sorted_addrs {
         let account = &genesis.alloc[addr];
-        let addr_lower = format!("{:?}", addr).to_lowercase();
 
         if account.balance > U256::ZERO {
-            let tx_id = format!("0xgenesis01{:013}{}", 0, addr_lower);
+            let tx_id = genesis_tx_id(1, *addr);
             let tx = DebankTransaction {
                 id: tx_id.clone(),
                 from: zero_addr,
@@ -825,7 +833,7 @@ pub fn build_genesis_txs_and_traces(
         if let Some(ref code) = account.code &&
             !code.is_empty()
         {
-            let tx_id = format!("0xgenesis02{:013}{}", 0, addr_lower);
+            let tx_id = genesis_tx_id(2, *addr);
             let tx = DebankTransaction {
                 id: tx_id.clone(),
                 from: zero_addr,
@@ -872,8 +880,7 @@ pub fn build_genesis_txs_and_traces(
     // Native token contract (0xeeee...eeee)
     let native_token_addr =
         Address::from_str("0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee").unwrap();
-    let native_token_addr_lower = format!("{:?}", native_token_addr).to_lowercase();
-    let native_token_tx_id = format!("0xgenesis03{:013}{}", 0, native_token_addr_lower);
+    let native_token_tx_id = genesis_tx_id(3, native_token_addr);
 
     txs.push(DebankTransaction {
         id: native_token_tx_id.clone(),
@@ -920,6 +927,50 @@ pub fn build_genesis_txs_and_traces(
 mod tests {
     use super::*;
     use revm::{database_interface::EmptyDB, state::AccountInfo};
+
+    #[test]
+    fn genesis_records_use_bytes32_tx_ids_and_matching_trace_ids() {
+        let address = Address::with_last_byte(0xab);
+        let code = Bytes::from_static(&[0x60, 0x00]);
+        let genesis = Genesis {
+            alloc: BTreeMap::from([(
+                address,
+                alloy_genesis::GenesisAccount {
+                    balance: U256::from(7),
+                    code: Some(code.clone()),
+                    ..Default::default()
+                },
+            )]),
+            ..Default::default()
+        };
+        let (txs, traces) = build_genesis_txs_and_traces(&genesis);
+        let expected_ids = [
+            "0x01000000000000000000000000000000000000000000000000000000000000ab",
+            "0x02000000000000000000000000000000000000000000000000000000000000ab",
+            "0x030000000000000000000000eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+        ];
+
+        assert_eq!(txs.len(), 3);
+        assert_eq!(traces.len(), 3);
+        for (index, ((tx, trace), expected_id)) in
+            txs.iter().zip(&traces).zip(expected_ids).enumerate()
+        {
+            assert!(tx.id.parse::<H256>().is_ok(), "invalid tx hash: {}", tx.id);
+            assert_eq!(tx.id, expected_id);
+            assert_eq!(tx.transaction_index, index as u64);
+            assert_eq!(trace.tx_id, tx.id);
+            assert_eq!(trace.id, trace.debank_id());
+        }
+        assert_eq!(txs[0].to, address);
+        assert_eq!(txs[0].value, U256::from(7));
+        assert_eq!(traces[0].call_create_type, "call");
+        assert_eq!(txs[1].to, address);
+        assert_eq!(txs[1].input, code);
+        assert_eq!(traces[1].output, code);
+        assert_eq!(traces[1].call_create_type, "create");
+        assert_eq!(txs[2].to, Address::repeat_byte(0xee));
+        assert_eq!(traces[2].call_create_type, "create");
+    }
 
     #[test]
     fn replay_bundle_diff_uses_only_final_changed_values() {
