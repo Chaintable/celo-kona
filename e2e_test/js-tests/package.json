@@ -10,9 +10,9 @@
   "license": "MIT",
   "dependencies": {
     "chai": "^5.1.2",
-    "ethers": "^6.10.0",
+    "ethers": "^6.17.0",
     "mocha": "^10.2.0",
-    "viem": "^2.35.1"
+    "viem": "^2.58.8"
   },
   "engines": {
     "node": ">=18.0.0"
